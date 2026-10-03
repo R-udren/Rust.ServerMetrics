@@ -1,25 +1,25 @@
-﻿using Newtonsoft.Json;
+using Newtonsoft.Json;
 
 namespace RustServerMetrics.Config;
 
 class ConfigData
 {
     #region Defaults
-    
+
     public const string DefaultInfluxDbUrl = "http://exampledb.com";
-    
+
     public const string DefaultInfluxDBName = "CHANGEME_rust_server_example";
-    
+
     public const string DefaultInfluxDBUser = "admin";
-    
+
     public const string DefaultInfluxDBPassword = "adminadmin";
-    
+
     public const string DefaultServerTag = "CHANGEME-01";
-    
+
     #endregion
 
     [JsonProperty(PropertyName = "Enabled")]
-    public bool Enabled;
+    public bool Enabled = false;
 
     [JsonProperty(PropertyName = "Influx Database Url")]
     public string DatabaseUrl = DefaultInfluxDbUrl;
@@ -37,7 +37,7 @@ class ConfigData
     public string ServerTag = DefaultServerTag;
 
     [JsonProperty(PropertyName = "Debug Logging")]
-    public bool DebugLogging;
+    public bool DebugLogging = false;
 
     [JsonProperty(PropertyName = "Amount of metrics to submit in each request")]
     public ushort BatchSize = 1000;

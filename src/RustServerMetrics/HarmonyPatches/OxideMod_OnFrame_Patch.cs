@@ -1,4 +1,4 @@
-﻿using HarmonyLib;
+using HarmonyLib;
 using System;
 using System.Collections;
 using System.Collections.Generic;
@@ -32,15 +32,15 @@ public static class OxideMod_OnFrame_Patch
             {
                 continue;
             }
-                
+
             _oxideCoreAssembly = assembly;
-                
+
             break;
         }
 
         return _oxideCoreAssembly != null;
     }
-        
+
     [HarmonyTargetMethods]
     public static IEnumerable<MethodBase> TargetMethods(Harmony harmonyInstance)
     {
@@ -156,7 +156,7 @@ public static class OxideMod_OnFrame_Patch
             new CodeInstruction(OpCodes.Callvirt, typeof(IEnumerator).GetMethod(nameof(IEnumerator.MoveNext))),
             new CodeInstruction(OpCodes.Brtrue_S, loopBodyLabel),
             // Loop Head End
-                
+
             // Dispose of IEnumerator
             new CodeInstruction(OpCodes.Ldloc, enumeratorLocal.LocalIndex),
             new CodeInstruction(OpCodes.Callvirt, typeof(IDisposable).GetMethod(nameof(IDisposable.Dispose))),

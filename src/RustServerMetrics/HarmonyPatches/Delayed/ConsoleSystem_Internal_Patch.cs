@@ -1,4 +1,4 @@
-﻿using HarmonyLib;
+using HarmonyLib;
 using RustServerMetrics.HarmonyPatches.Utility;
 using System.Collections.Generic;
 using System.Reflection;

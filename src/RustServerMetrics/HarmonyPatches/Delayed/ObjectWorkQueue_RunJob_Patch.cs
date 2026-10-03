@@ -1,4 +1,4 @@
-﻿using HarmonyLib;
+using HarmonyLib;
 using RustServerMetrics.HarmonyPatches.Utility;
 using System;
 using System.Collections.Generic;
@@ -49,7 +49,7 @@ internal static class ObjectWorkQueue_RunJob_Patch
                 continue;
             }
 
-            var method = AccessTools.Method(type, nameof(ObjectWorkQueue<>.RunJob));
+            var method = AccessTools.Method(type, "RunJob");
             if (method != null && yielded.Add(type.FullName))
             {
                 yield return method;

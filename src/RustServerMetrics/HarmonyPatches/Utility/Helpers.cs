@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Reflection.Emit;
@@ -19,13 +19,13 @@ public static class Helpers
             {
                 continue;
             }
-            
+
             ret.Insert(i, new CodeInstruction(OpCodes.Call, postfix.Method));
 
             if (loads is { Length: > 0 })
             {
                 for (var j = loads.Length - 1; j >= 0; j--)
-                { 
+                {
                     ret.Insert(i, new CodeInstruction(loads[j]));
                 }
             }
@@ -34,15 +34,15 @@ public static class Helpers
             {
                 continue;
             }
-            
+
             while (code.labels.Count > 0)
             {
                 var label = code.labels[0];
                 ret[i].labels.Add(label);
                 code.labels.RemoveAt(0);
             }
-        } 
-        
+        }
+
         return ret;
     }
 }

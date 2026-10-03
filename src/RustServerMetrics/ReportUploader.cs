@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.Text;
@@ -9,181 +9,187 @@ namespace RustServerMetrics;
 
 internal class ReportUploader : MonoBehaviour
 {
-    private const int SendBufferCapacity = 100000;
-
-    private readonly Action _notifySubsequentNetworkFailuresAction;
-    private readonly Action _notifySubsequentHttpFailuresAction;
-
-    private readonly Queue<string> _sendBuffer = new(SendBufferCapacity);
+    private readonly Queue<string> _sendBuffer = new(UploadPolicy.BufferCapacity);
     private readonly StringBuilder _payloadBuilder = new();
-
-    private bool _isRunning;
-    private ushort _attempt;
-    private byte[] _data;
-    private Uri _uri;
-    private MetricsLogger _metricsLogger;
-
+    private readonly WaitForSecondsRealtime _coalesceDelay = new(UploadPolicy.CoalesceSeconds);
+    private readonly Action _notifyFailuresAction;
     private char[] _charBuffer = new char[8192 * 4];
+    private MetricsLogger _metricsLogger;
+    private UnityWebRequest _activeRequest;
+    private int _activeBatchReports;
+    private bool _isRunning;
+    private bool _throttleErrors;
+    private uint _accumulatedErrors;
 
-    private bool _throttleNetworkErrorMessages;
-    private uint _accumulatedNetworkErrors;
-
-    private bool _throttleHttpErrorMessages;
-    private uint _accumulatedHttpErrors;
-
-    private ushort BatchSize
-    {
-        get
-        {
-            var configVal = _metricsLogger.Configuration?.BatchSize ?? 1000;
-            return configVal < 1000 ? (ushort)1000 : configVal;
-        }
-    }
-    
     public bool IsRunning => _isRunning;
     public int BufferSize => _sendBuffer.Count;
+    public long DroppedReports { get; private set; }
+    public long FailedBatches { get; private set; }
+    public long SentBatches { get; private set; }
 
     public ReportUploader()
     {
-        _notifySubsequentNetworkFailuresAction = NotifySubsequentNetworkFailures;
-        _notifySubsequentHttpFailuresAction = NotifySubsequentHttpFailures;
-    }
-
-    public ReportUploader(Action notifySubsequentHttpFailuresAction)
-    {
-        _notifySubsequentHttpFailuresAction = notifySubsequentHttpFailuresAction;
+        _notifyFailuresAction = NotifyFailures;
     }
 
     private void Awake()
     {
         _metricsLogger = GetComponent<MetricsLogger>();
-        if (_metricsLogger == null)
-        {
-            Debug.LogError("[ServerMetrics] ReportUploader failed to find the MetricsLogger component");
-            Destroy(this);
-        }
+        if (_metricsLogger != null)
+            return;
+
+        Debug.LogError("[ServerMetrics]: ReportUploader failed to find its MetricsLogger.");
+        Destroy(this);
     }
 
     public void AddToSendBuffer(string payload)
     {
-        if (_sendBuffer.Count == SendBufferCapacity)
+        if (!_metricsLogger.Ready || string.IsNullOrEmpty(payload))
+            return;
+
+        if (_sendBuffer.Count == UploadPolicy.BufferCapacity)
         {
             _sendBuffer.Dequeue();
+            DroppedReports++;
         }
-
         _sendBuffer.Enqueue(payload);
+        if (_isRunning)
+            return;
 
-        if (!_isRunning)
-        {
-            StartCoroutine(SendBufferLoop());
-        }
+        _isRunning = true;
+        StartCoroutine(SendBufferLoop());
     }
 
     private IEnumerator SendBufferLoop()
     {
-        _isRunning = true;
-        yield return null;
-
-        while (_sendBuffer.Count > 0 && _isRunning)
+        try
         {
-            var amountToTake = Mathf.Min(_sendBuffer.Count, BatchSize);
-            for (var i = 0; i < amountToTake; i++)
+            while (_isRunning && _sendBuffer.Count > 0)
             {
-                _payloadBuilder.Append(_sendBuffer.Dequeue());
-                _payloadBuilder.Append("\n");
+                var batchSize = _metricsLogger.Configuration.BatchSize;
+                if (UploadPolicy.ShouldCoalesce(_sendBuffer.Count, batchSize))
+                    yield return _coalesceDelay;
+                if (!_isRunning || !_metricsLogger.Ready)
+                    yield break;
+
+                _activeBatchReports = Math.Min(_sendBuffer.Count, batchSize);
+                _payloadBuilder.Clear();
+                for (var i = 0; i < _activeBatchReports; i++)
+                    _payloadBuilder.Append(_sendBuffer.Dequeue()).Append('\n');
+
+                if (_payloadBuilder.Length > _charBuffer.Length)
+                    _charBuffer = new char[_payloadBuilder.Length + 1024];
+                _payloadBuilder.CopyTo(0, _charBuffer, 0, _payloadBuilder.Length);
+                var data = Encoding.UTF8.GetBytes(_charBuffer, 0, _payloadBuilder.Length);
+                _payloadBuilder.Clear();
+                yield return SendRequest(data, _metricsLogger.BaseUri, _metricsLogger.AuthorizationHeader);
+                _activeBatchReports = 0;
             }
-            _attempt = 0;
-
-            // more GC friendly GetBytes implementation
-            if (_payloadBuilder.Length > _charBuffer.Length)
-            {
-                _charBuffer = new char[_payloadBuilder.Length + 1024];
-            }
-
-            _payloadBuilder.CopyTo(0, _charBuffer, 0, _payloadBuilder.Length);
-            _data = Encoding.UTF8.GetBytes(_charBuffer, 0, _payloadBuilder.Length);
-
-            _uri = _metricsLogger.BaseUri;
-            _payloadBuilder.Clear();
-            yield return SendRequest();
         }
-        _isRunning = false;
+        finally
+        {
+            _isRunning = false;
+        }
     }
 
-    private IEnumerator SendRequest()
+    private IEnumerator SendRequest(byte[] data, Uri uri, string authorization)
     {
-        var request = new UnityWebRequest(_uri, UnityWebRequest.kHttpVerbPOST)
+        for (var attempt = 1; attempt <= UploadPolicy.MaximumAttempts && _isRunning; attempt++)
         {
-            uploadHandler = new UploadHandlerRaw(_data),
-            downloadHandler = new DownloadHandlerBuffer(),
-            timeout = 15,
-            useHttpContinue = true,
-            redirectLimit = 5
-        };
-        yield return request.SendWebRequest();
-
-        if (request.isNetworkError)
-        {
-            if (_attempt >= 2)
+            var request = new UnityWebRequest(uri, UnityWebRequest.kHttpVerbPOST)
             {
-                if (_throttleNetworkErrorMessages)
-                {
-                    _accumulatedNetworkErrors += 1;
-                }
-                else
-                {
-                    Debug.LogError($"Two consecutive network failures occurred while submitting a batch of metrics");
-                    InvokeHandler.Invoke(this, _notifySubsequentNetworkFailuresAction, 5);
-                    _throttleNetworkErrorMessages = true;
-                }
+                uploadHandler = new UploadHandlerRaw(data),
+                downloadHandler = new DownloadHandlerBuffer(),
+                timeout = 15,
+                redirectLimit = 0
+            };
+            request.SetRequestHeader("Authorization", authorization);
+            request.SetRequestHeader("Content-Type", "text/plain; charset=utf-8");
+            _activeRequest = request;
+            bool networkError;
+            bool success;
+            long status;
+            string error;
+            string response;
+            try
+            {
+                yield return request.SendWebRequest();
+                networkError = request.result == UnityWebRequest.Result.ConnectionError;
+                status = request.responseCode;
+                success = status >= 200 && status < 300 && request.result == UnityWebRequest.Result.Success;
+                error = request.error;
+                response = _metricsLogger.Configuration?.DebugLogging == true ? request.downloadHandler.text : null;
+            }
+            finally
+            {
+                DisposeActiveRequest();
+            }
+
+            if (success)
+            {
+                SentBatches++;
+                _activeBatchReports = 0;
                 yield break;
             }
+            if (UploadPolicy.ShouldRetry(networkError, status, attempt))
+            {
+                yield return new WaitForSecondsRealtime(attempt);
+                continue;
+            }
 
-            _attempt++;
-            yield return SendRequest();
+            FailedBatches++;
+            DroppedReports += _activeBatchReports;
+            _activeBatchReports = 0;
+            ReportFailure(status, error, response);
             yield break;
         }
+    }
 
-        if (request.isHttpError)
+    private void ReportFailure(long status, string error, string response)
+    {
+        if (_throttleErrors)
         {
-            if (_throttleHttpErrorMessages)
-            {
-                _accumulatedHttpErrors += 1;
-            }
-            else
-            {
-                Debug.LogError($"A HTTP error occurred while submitting batch of metrics: {request.error}");
-                if (_metricsLogger.Configuration?.DebugLogging == true) Debug.LogError(request.downloadHandler.text);
-                InvokeHandler.Invoke(this, _notifySubsequentHttpFailuresAction, 5);
-                _throttleHttpErrorMessages = true;
-            }
+            _accumulatedErrors++;
+            return;
         }
+        Debug.LogError($"[ServerMetrics]: Metrics batch discarded after upload failure (HTTP {status}): {error}");
+        if (response != null)
+            Debug.LogError(response);
+        _throttleErrors = true;
+        InvokeHandler.Invoke(this, _notifyFailuresAction, 5);
     }
 
-    void NotifySubsequentNetworkFailures()
+    private void NotifyFailures()
     {
-        _throttleNetworkErrorMessages = false;
-        if (_accumulatedNetworkErrors == 0) return;
-        Debug.LogError($"{_accumulatedNetworkErrors} subsequent network errors occurred in the last 5 seconds");
-        _accumulatedNetworkErrors = 0;
+        _throttleErrors = false;
+        if (_accumulatedErrors == 0)
+            return;
+        Debug.LogError($"[ServerMetrics]: {_accumulatedErrors} additional batch failures in the last five seconds.");
+        _accumulatedErrors = 0;
     }
 
-    void NotifySubsequentHttpFailures()
+    private void DisposeActiveRequest()
     {
-        _throttleHttpErrorMessages = false;
-        if (_accumulatedHttpErrors == 0) return;
-        Debug.LogError($"{_accumulatedHttpErrors} subsequent HTTP errors occurred in the last 5 seconds");
-        _accumulatedHttpErrors = 0;
+        if (_activeRequest == null)
+            return;
+        _activeRequest.Dispose();
+        _activeRequest = null;
     }
 
-    void OnDestroy()
-    {
-        Stop();
-    }
+    private void OnDestroy() => Stop();
 
     public void Stop()
     {
         _isRunning = false;
+        _activeRequest?.Abort();
+        DisposeActiveRequest();
         StopAllCoroutines();
+        InvokeHandler.CancelInvoke(this, _notifyFailuresAction);
+        DroppedReports += _sendBuffer.Count + _activeBatchReports;
+        _sendBuffer.Clear();
+        _payloadBuilder.Clear();
+        _activeBatchReports = 0;
+        _throttleErrors = false;
+        _accumulatedErrors = 0;
     }
 }

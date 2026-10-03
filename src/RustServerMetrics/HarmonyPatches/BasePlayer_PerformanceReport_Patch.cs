@@ -1,4 +1,4 @@
-﻿using HarmonyLib;
+using HarmonyLib;
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -12,13 +12,14 @@ namespace RustServerMetrics.HarmonyPatches;
 public class BasePlayer_PerformanceReport_Patch
 {
     [HarmonyTranspiler]
-    public static IEnumerable<CodeInstruction> Transpile(IEnumerable<CodeInstruction> originalInstructions, 
+    public static IEnumerable<CodeInstruction> Transpile(IEnumerable<CodeInstruction> originalInstructions,
                                                          ILGenerator ilGenerator)
     {
         var instructionsList = originalInstructions.ToList();
         var jumpLabel = ilGenerator.DefineLabel();
-        
-        CodeMatch[] needle = 
+        var continueLabel = ilGenerator.DefineLabel();
+
+        CodeMatch[] needle =
         [
             new(OpCodes.Ldloc_0),
             new(OpCodes.Ldstr, "legacy"),
@@ -28,10 +29,10 @@ public class BasePlayer_PerformanceReport_Patch
 
         CodeInstruction[] injection =
         [
-            new(OpCodes.Ldsfld, AccessTools.Field(typeof(SingletonComponent<MetricsLogger>), nameof(SingletonComponent<MetricsLogger>.Instance))),
             new(OpCodes.Ldloc_1),
-            new(OpCodes.Call, AccessTools.Method(typeof(MetricsLogger), nameof(MetricsLogger.OnClientPerformanceReport))),
-            new(OpCodes.Brtrue, jumpLabel)
+            new(OpCodes.Call, AccessTools.Method(typeof(MetricsLogger), nameof(MetricsLogger.TryOnClientPerformanceReport), [typeof(ProtoBuf.PerformanceReport)])),
+            new(OpCodes.Brfalse, continueLabel),
+            new(OpCodes.Leave, jumpLabel)
         ];
 
         try
@@ -41,6 +42,7 @@ public class BasePlayer_PerformanceReport_Patch
             codeMatcher.MatchEndForward(needle)
                        .ThrowIfInvalid("Unable to find the expected injection point")
                        .Advance(1)
+                       .AddLabels([continueLabel])
                        .InsertAndAdvance(injection)
                        .End()
                        .AddLabels([jumpLabel]);

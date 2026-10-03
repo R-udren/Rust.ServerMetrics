@@ -1,4 +1,4 @@
-﻿using HarmonyLib;
+using HarmonyLib;
 using Network;
 using Newtonsoft.Json;
 using RustServerMetrics.Config;
@@ -6,6 +6,7 @@ using RustServerMetrics.HarmonyPatches.Utility;
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Globalization;
 using System.Linq;
 using System.Reflection;
 using System.Text;
@@ -17,32 +18,26 @@ public class MetricsLogger : SingletonComponent<MetricsLogger>
 {
     private const string ConfigurationPath = "HarmonyMods_Data/ServerMetrics/Configuration.json";
     private readonly StringBuilder _stringBuilder = new();
-    private readonly Dictionary<ulong, Action> _playerStatsActions = new();
-    private readonly Dictionary<ulong, uint> _perfReportDelayCounter = new();
+    private readonly Dictionary<ulong, Action> _playerStatsActions = [];
+    private readonly Dictionary<ulong, uint> _perfReportDelayCounter = [];
 
-    private class NetworkUpdateData
+    private class NetworkUpdateData(int count, long bytes)
     {
-        public int Count;
-        
-        public long Bytes;
+        public int Count = count;
 
-        public NetworkUpdateData(int count, long bytes)
-        {
-            Count = count;
-            Bytes = bytes;
-        }
+        public long Bytes = bytes;
     }
 
     private readonly Dictionary<Message.Type, NetworkUpdateData> _networkUpdates = Enum.GetValues(typeof(Message.Type))
                                                                                        .Cast<Message.Type>()
                                                                                        .Distinct()
-                                                                                       .ToDictionary(x => x, 
+                                                                                       .ToDictionary(x => x,
                                                                                                      _ => new NetworkUpdateData(0, 0));
-    
+
     private static readonly IReadOnlyDictionary<Message.Type, string> MessageTypeNames = Enum.GetValues(typeof(Message.Type))
                                                                                              .Cast<Message.Type>()
                                                                                              .Distinct()
-                                                                                             .ToDictionary(x => x, 
+                                                                                             .ToDictionary(x => x,
                                                                                                            x => x.ToString());
 
     public readonly MetricsTimeStorage<MethodInfo> ServerInvokes = new("invoke_execution", LogMethodInfo);
@@ -60,7 +55,7 @@ public class MetricsLogger : SingletonComponent<MetricsLogger>
     public bool Ready { get => IsReady; private set => IsReady = value; }
     internal ConfigData Configuration { get; private set; }
 
-    private Uri _baseUri;
+    private InfluxConnection _connection;
     private readonly int _performanceReportRequestId = UnityEngine.Random.Range(-2147483648, 2147483647);
     private ReportUploader _reportUploader;
     private Message.Type _lastMessageType;
@@ -68,32 +63,46 @@ public class MetricsLogger : SingletonComponent<MetricsLogger>
     private int _lastFrameID;
     private System.Diagnostics.Process _currentProcess;
 
-    public Uri BaseUri
-    {
-        get
-        {
-            if (_baseUri != null)
-            {
-                return _baseUri;
-            }
-
-            _baseUri = new Uri(new Uri(Configuration.DatabaseUrl), 
-                               $"/write?db={Configuration.DatabaseName}&precision=ms&u={Configuration.DatabaseUser}&p={Configuration.DatabasePassword}");
-            return _baseUri;
-        }
-    }
+    public Uri BaseUri => _connection?.WriteUri ?? throw new InvalidOperationException("Metrics connection is not configured.");
+    public string AuthorizationHeader => _connection?.AuthorizationHeader ?? throw new InvalidOperationException("Metrics connection is not configured.");
 
     #region Initialization
 
     internal static void Initialize()
     {
+        if (Instance != null)
+            return;
         new GameObject().AddComponent<MetricsLogger>();
+    }
+
+    internal static void TryOnPlayerInit(BasePlayer player)
+    {
+        var logger = Instance;
+        if (logger == null || !IsReady || player == null)
+            return;
+        logger.OnPlayerInit(player);
+    }
+
+    internal static void TryOnPlayerDisconnected(BasePlayer player)
+    {
+        var logger = Instance;
+        if (logger == null || player == null)
+            return;
+        logger.OnPlayerDisconnected(player);
+    }
+
+    internal static bool TryOnClientPerformanceReport(ProtoBuf.PerformanceReport report)
+    {
+        var logger = Instance;
+        if (logger == null || !IsReady || report == null || logger._reportUploader == null)
+            return false;
+        return logger.OnClientPerformanceReport(report);
     }
 
     internal void OnServerStarted()
     {
         RustServerMetricsLoader.__serverStarted = true;
-            
+
         Debug.Log($"[ServerMetrics]: Applying Startup Patches");
         var assembly = GetType().Assembly;
 
@@ -108,13 +117,13 @@ public class MetricsLogger : SingletonComponent<MetricsLogger>
         foreach (var nestedType in nestedTypes)
         {
             if (nestedType.GetCustomAttribute<DelayedHarmonyPatchAttribute>(false) == null) continue;
-                
+
             var patchProcessor = new PatchClassProcessor((Harmony)harmonyInstance, nestedType);
             Debug.Log(patchProcessor.Patch() == null ? $"[ServerMetrics]: Failed to apply patch: {nestedType.Name}" : $"[ServerMetrics]: Applied Startup Patch: {nestedType.Name}");
         }
     }
 
-    public override void Awake()
+    protected override void Awake()
     {
         base.Awake();
         _reportUploader = gameObject.AddComponent<ReportUploader>();
@@ -125,15 +134,15 @@ public class MetricsLogger : SingletonComponent<MetricsLogger>
         {
             return;
         }
-            
+
         if (!Configuration.Enabled)
         {
             Debug.LogWarning("[ServerMetrics]: Metrics gathering has been disabled in the configuration");
             return;
         }
 
-        StartLoggingMetrics();
         Ready = true;
+        StartLoggingMetrics();
     }
 
     public void StartLoggingMetrics()
@@ -146,6 +155,9 @@ public class MetricsLogger : SingletonComponent<MetricsLogger>
         InvokeRepeating(WorkQueueTimes.SerializeToStringBuilder, UnityEngine.Random.Range(0f, 1f), 1f);
         InvokeRepeating(ServerUpdate.SerializeToStringBuilder, UnityEngine.Random.Range(0f, 1f), 1f);
         InvokeRepeating(TimeWarnings.SerializeToStringBuilder, UnityEngine.Random.Range(0f, 1f), 1f);
+
+        foreach (var player in BasePlayer.activePlayerList)
+            OnPlayerInit(player);
     }
 
     #endregion
@@ -164,8 +176,7 @@ public class MetricsLogger : SingletonComponent<MetricsLogger>
 
     internal void OnPlayerDisconnected(BasePlayer player)
     {
-        if (!Ready) return;
-        if (!Configuration.GatherPlayerMetrics) return;
+        if (player == null) return;
         if (_playerStatsActions.TryGetValue(player.userID, out var action))
             player.CancelInvoke(action);
         _playerStatsActions.Remove(player.userID);
@@ -178,7 +189,7 @@ public class MetricsLogger : SingletonComponent<MetricsLogger>
         {
             return;
         }
-            
+
         _lastMessageType = messageType;
     }
 
@@ -188,7 +199,7 @@ public class MetricsLogger : SingletonComponent<MetricsLogger>
         {
             return;
         }
-            
+
         var data = _networkUpdates[_lastMessageType];
         if (sendInfo.connection != null)
         {
@@ -199,7 +210,7 @@ public class MetricsLogger : SingletonComponent<MetricsLogger>
         {
             var count = sendInfo.connections.Count;
             data.Count += count;
-            data.Bytes += write.Length * count;
+            data.Bytes += MetricValues.NetworkBytes(write.Length, count);
         }
     }
 
@@ -215,7 +226,7 @@ public class MetricsLogger : SingletonComponent<MetricsLogger>
                 builder.Append(",plugin=\"");
                 AppendPluginNameSanitized(builder, report.Key);
                 builder.Append("\" hookTime=");
-                builder.Append(report.Value);
+                builder.Append(report.Value.ToString(CultureInfo.InvariantCulture));
             });
         }
     }
@@ -234,7 +245,7 @@ public class MetricsLogger : SingletonComponent<MetricsLogger>
             builder.Append(" memory=");
             builder.Append(report.memory_system);
             builder.Append("i,fps=");
-            builder.Append(report.fps);
+            builder.Append(report.fps.ToString(CultureInfo.InvariantCulture));
         });
 
         return true;
@@ -242,6 +253,9 @@ public class MetricsLogger : SingletonComponent<MetricsLogger>
 
     private void GatherPlayerSecondStats(BasePlayer player)
     {
+        if (!Ready || Configuration?.GatherPlayerMetrics != true || player == null || player.net?.connection == null)
+            return;
+
         if (!player.IsReceivingSnapshot)
         {
             _perfReportDelayCounter.TryGetValue(player.userID, out var perfReportCounter);
@@ -258,12 +272,7 @@ public class MetricsLogger : SingletonComponent<MetricsLogger>
 
         UploadPacket("connection_latency", player, (builder, basePlayer) =>
         {
-            var ip = basePlayer.net.connection.ipaddress;
-
-            builder.Append(",steamid=");
-            builder.Append(basePlayer.UserIDString);
-            builder.Append(",ip=");
-            builder.Append(ip[..ip.LastIndexOf(':')]);
+            MetricValues.AppendConnectionTags(builder, basePlayer.UserIDString, basePlayer.net.connection.ipaddress);
             builder.Append(" ping=");
             builder.Append(Net.sv.GetAveragePing(basePlayer.net.connection));
             builder.Append("i,packet_loss=");
@@ -357,25 +366,10 @@ public class MetricsLogger : SingletonComponent<MetricsLogger>
     {
         _stringBuilder.Clear();
 
-        _stringBuilder.Append("framerate,server=");
-        _stringBuilder.Append(serverTag);
-        _stringBuilder.Append(" instant=");
-        _stringBuilder.Append(current.frameRate);
-        _stringBuilder.Append(",average=");
-        _stringBuilder.Append(current.frameRateAverage);
-        _stringBuilder.Append(" ");
-        _stringBuilder.Append(epochNow);
-        _stringBuilder.Append("\n");
-
-        _stringBuilder.Append("frametime,server=");
-        _stringBuilder.Append(serverTag);
-        _stringBuilder.Append(" instant=");
-        _stringBuilder.Append(current.frameTime);
-        _stringBuilder.Append(",average=");
-        _stringBuilder.Append(current.frameTimeAverage);
-        _stringBuilder.Append(" ");
-        _stringBuilder.Append(epochNow);
-        _stringBuilder.Append("\n");
+        MetricValues.AppendFrameMetric(_stringBuilder, "framerate", serverTag, epochNow,
+            current.frameRate, current.frameRateAverage);
+        MetricValues.AppendFrameMetric(_stringBuilder, "frametime", serverTag, epochNow,
+            current.frameTime, current.frameTimeAverage);
 
         _stringBuilder.Append("memory,server=");
         _stringBuilder.Append(serverTag);
@@ -507,7 +501,7 @@ public class MetricsLogger : SingletonComponent<MetricsLogger>
         builder.Append(info, start, info.Length - start);
     }
     #endregion
-        
+
     #region Commands
 
     private void RegisterCommands()
@@ -538,7 +532,7 @@ public class MetricsLogger : SingletonComponent<MetricsLogger>
 
         // Would be nice if this had a public setter, or better yet, a register command helper
         // update: now it does
-        ConsoleSystem.Index.All = ConsoleSystem.Index.All.Concat(new[] { reloadCfgCommand, statusCommand }).ToArray();
+        ConsoleSystem.Index.All = [.. ConsoleSystem.Index.All, .. new[] { reloadCfgCommand, statusCommand }];
     }
 
     private void StatusCommand(ConsoleSystem.Arg arg)
@@ -550,101 +544,95 @@ public class MetricsLogger : SingletonComponent<MetricsLogger>
         _stringBuilder.AppendLine("Report Uploader:");
         _stringBuilder.Append("\tRunning: "); _stringBuilder.Append(_reportUploader.IsRunning); _stringBuilder.AppendLine();
         _stringBuilder.Append("\tIn Buffer: "); _stringBuilder.Append(_reportUploader.BufferSize); _stringBuilder.AppendLine();
+        _stringBuilder.Append("\tDropped Reports: "); _stringBuilder.Append(_reportUploader.DroppedReports); _stringBuilder.AppendLine();
+        _stringBuilder.Append("\tFailed Batches: "); _stringBuilder.Append(_reportUploader.FailedBatches); _stringBuilder.AppendLine();
+        _stringBuilder.Append("\tSent Batches: "); _stringBuilder.Append(_reportUploader.SentBatches); _stringBuilder.AppendLine();
         arg.ReplyWith(_stringBuilder.ToString());
     }
 
     private void ReloadCfgCommand(ConsoleSystem.Arg arg)
     {
+        StopLoggingMetrics();
         LoadConfiguration();
-        if (!ValidateConfiguration() || Configuration.Enabled == false)
+        if (!ValidateConfiguration())
         {
-            Ready = false;
-
-            // why is there no cancel all invokes method ...
-            var list = new List<InvokeAction>();
-            InvokeHandler.FindInvokes(this, list);
-            foreach (var invoke in list)
-            {
-                CancelInvoke(invoke.action);
-            }
-
-            foreach (var player in _playerStatsActions)
-            {
-                var basePlayer = BasePlayer.FindByID(player.Key);
-                if (basePlayer == null) continue;
-                basePlayer.CancelInvoke(player.Value);
-            }
-            _reportUploader.Stop();
-
-            if (!Configuration.Enabled)
-            {
-                arg.ReplyWith("[ServerMetrics]: Metrics gathering has been disabled in the configuration");
-                return;
-            }
+            arg.ReplyWith("[ServerMetrics]: Invalid configuration; metrics gathering stopped. See server log.");
+            return;
         }
-        else if (!Ready)
+        if (!Configuration.Enabled)
         {
-            Ready = true;
-            foreach (var player in BasePlayer.activePlayerList)
-            {
-                OnPlayerInit(player);
-            }
-
-            StartLoggingMetrics();
+            arg.ReplyWith("[ServerMetrics]: Metrics gathering has been disabled in the configuration");
+            return;
         }
+
+        Ready = true;
+        StartLoggingMetrics();
         arg.ReplyWith("[ServerMetrics]: Configuration reloaded");
     }
 
+    internal void StopLoggingMetrics()
+    {
+        Ready = false;
+        var invokes = new List<InvokeAction>();
+        InvokeHandler.FindInvokes(this, invokes);
+        foreach (var invoke in invokes)
+            CancelInvoke(invoke.action);
+
+        foreach (var player in _playerStatsActions)
+        {
+            var basePlayer = BasePlayer.FindByID(player.Key);
+            basePlayer?.CancelInvoke(player.Value);
+        }
+        _playerStatsActions.Clear();
+        _perfReportDelayCounter.Clear();
+        ServerInvokes.Clear();
+        ServerRpcCalls.Clear();
+        ServerConsoleCommands.Clear();
+        WorkQueueTimes.Clear();
+        ServerUpdate.Clear();
+        TimeWarnings.Clear();
+        _reportUploader?.Stop();
+    }
+
+    protected override void OnDestroy()
+    {
+        StopLoggingMetrics();
+        _currentProcess?.Dispose();
+        base.OnDestroy();
+    }
+
     #endregion
-        
+
     #region Configuration
 
-    private bool ValidateConfiguration()
-    {
-        if (Configuration == null) return false;
-
-        var valid = true;
-        if (Configuration.DatabaseUrl == ConfigData.DefaultInfluxDbUrl)
-        {
-            Debug.LogError("[ServerMetrics]: Default database url detected in configuration, loading aborted");
-            valid = false;
-        }
-
-        if (Configuration.DatabaseName == ConfigData.DefaultInfluxDBName)
-        {
-            Debug.LogError("[ServerMetrics]: Default database name detected in configuration, loading aborted");
-            valid = false;
-        }
-
-        if (Configuration.ServerTag == ConfigData.DefaultServerTag)
-        {
-            Debug.LogError("[ServerMetrics]: Default server tag detected in configuration, loading aborted");
-            valid = false;
-        }
-
-        return valid;
-    }
+    private bool ValidateConfiguration() => Configuration != null && (!Configuration.Enabled || _connection != null);
 
     private void LoadConfiguration()
     {
+        Configuration = null;
+        _connection = null;
+        if (!File.Exists(ConfigurationPath))
+        {
+            Configuration = new ConfigData();
+            SaveConfiguration();
+            return;
+        }
+
         try
         {
-            var configStr = File.ReadAllText(ConfigurationPath);
-            Configuration = JsonConvert.DeserializeObject<ConfigData>(configStr) ?? new ConfigData();
-            var uri = new Uri(Configuration.DatabaseUrl);
-            _baseUri = new Uri(uri, $"/write?db={Configuration.DatabaseName}&precision=ms&u={Configuration.DatabaseUser}&p={Configuration.DatabasePassword}");
+            var config = JsonConvert.DeserializeObject<ConfigData>(File.ReadAllText(ConfigurationPath)) ?? throw new JsonSerializationException("Configuration must be a JSON object.");
+            var connection = config.Enabled ? InfluxConnection.Create(config) : null;
+            Configuration = config;
+            _connection = connection;
         }
-        catch
+        catch (ArgumentException ex)
         {
-            Debug.LogError("[ServerMetrics]: The configuration seems to be missing or malformed. Defaults will be loaded.");
-            Configuration = new ConfigData();
-
-            if (File.Exists(ConfigurationPath))
-            {
-                return;
-            }
+            Debug.LogError("[ServerMetrics]: Invalid configuration: " + ex.Message);
         }
-        SaveConfiguration();
+        catch (Exception ex) when (ex is IOException || ex is UnauthorizedAccessException || ex is JsonException)
+        {
+            Debug.LogError("[ServerMetrics]: Cannot read configuration (" + ex.GetType().Name + "); metrics gathering stopped. The file was preserved.");
+        }
     }
 
     private void SaveConfiguration()
@@ -656,7 +644,7 @@ public class MetricsLogger : SingletonComponent<MetricsLogger>
             {
                 configFileInfo.Directory.Create();
             }
-                
+
             var serializedConfiguration = JsonConvert.SerializeObject(Configuration, Formatting.Indented);
             File.WriteAllText(ConfigurationPath, serializedConfiguration);
         }

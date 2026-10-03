@@ -1,4 +1,4 @@
-﻿using HarmonyLib;
+using HarmonyLib;
 
 // ReSharper disable InconsistentNaming
 
@@ -14,7 +14,7 @@ public class Performance_FPSTimer_Patch
         {
             return;
         }
-        
+
         MetricsLogger.Instance.OnPerformanceReportGenerated();
     }
 }

@@ -1,4 +1,4 @@
-﻿using HarmonyLib;
+using HarmonyLib;
 using System.Collections.Generic;
 using System.Reflection;
 using System.Reflection.Emit;
@@ -15,14 +15,11 @@ public class BasePlayer_OnDisconnected_Patch
     {
         var retList = new List<CodeInstruction>(originalInstructions);
 
-        var fieldInfo = typeof(SingletonComponent<MetricsLogger>)
-            .GetField(nameof(SingletonComponent<MetricsLogger>.Instance), BindingFlags.Static | BindingFlags.Public);
-
         var methodInfo = typeof(MetricsLogger)
-            .GetMethod(nameof(MetricsLogger.OnPlayerDisconnected), BindingFlags.Instance | BindingFlags.NonPublic);
+            .GetMethod(nameof(MetricsLogger.TryOnPlayerDisconnected), BindingFlags.Static | BindingFlags.NonPublic,
+                null, [typeof(BasePlayer)], null);
 
         retList.InsertRange(0, [
-            new CodeInstruction(OpCodes.Ldsfld, fieldInfo),
             new CodeInstruction(OpCodes.Ldarg_0),
             new CodeInstruction(OpCodes.Call, methodInfo)
         ]);

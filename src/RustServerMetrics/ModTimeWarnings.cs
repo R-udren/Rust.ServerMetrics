@@ -1,4 +1,4 @@
-﻿using System.Collections.Generic;
+using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
 using System.Reflection.Emit;
@@ -29,10 +29,10 @@ public static class ModTimeWarnings
 
         return true;
     }
-    
+
     [HarmonyTargetMethods]
     public static IEnumerable<MethodBase> TargetMethods(Harmony harmonyInstance) => Methods;
-    
+
     [HarmonyTranspiler]
     public static IEnumerable<CodeInstruction> Transpile(IEnumerable<CodeInstruction> originalInstructions, MethodBase methodBase, ILGenerator ilGenerator)
     {
@@ -44,7 +44,7 @@ public static class ModTimeWarnings
             new (OpCodes.Call, AccessTools.Method(typeof(Stopwatch), nameof(Stopwatch.GetTimestamp))),
             new (OpCodes.Stloc, local)
         });
-        
+
         return Helpers.Postfix(ret,
                                CustomPostfix,
                                new CodeInstruction(OpCodes.Ldstr, $"{methodBase.DeclaringType?.Name}.{methodBase.Name}"),
