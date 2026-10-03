@@ -48,7 +48,28 @@ Collects native server performance, entity/task counts, invoke/work-queue timing
 network traffic and passive player latency. Plugin impact uses each framework's existing
 elapsed-time counters; their coverage differs and does not measure total plugin CPU.
 Unity/framework warnings, errors and exceptions are bounded and redacted, with compact
-stack details. File-only logs and earlier startup output are outside capture.
+stack details. By default, file-only logs and earlier startup output are outside capture.
+
+### Optional full server log capture
+
+Warnings and errors are collected by default. Run `metricsadapter.logs all on`
+in the server console to also collect routine Unity/framework output and new entries
+from `server.log`. Run `metricsadapter.logs all off` to disable the extra collection.
+The setting is saved and takes effect without restarting Rust.
+
+Use **Other server logs** on any metrics dashboard to show routine log annotations.
+In **Logs & Exceptions**, **Show other logs** includes them in the table and counts.
+Both display toggles are off by default and do not change collection settings.
+
+Set `ServerLogFiles` in the adapter configuration to include additional server or
+plugin log files; paths are relative to the server working directory, or absolute.
+File capture starts at the end, handles rotation/truncation, and uses collection time.
+Matching Unity/file messages within ten seconds are deduplicated across streams.
+Only output emitted through Unity or written to configured files can be captured;
+raw console output needs to be written to a log file first.
+Routine output has its own queue and `InfoLogLimitPerMinute` (120 by default),
+separate from the warning/error quota. Capture state, file failures and drops are
+shown in the logs dashboard. Existing configuration is preserved when updating.
 
 The original detailed dashboard and measurements are preserved. RPC/command timings
 and client FPS/memory reports need additional compatible instrumentation. Legacy Harmony

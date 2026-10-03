@@ -61,7 +61,7 @@
         }
       },
       {
-        "name": "Errors & exceptions",
+        "name": "Warnings & errors",
         "enable": true,
         "hide": false,
         "iconColor": "#FF637D",
@@ -73,7 +73,26 @@
           "refId": "LogAnno",
           "rawQuery": true,
           "fromAnnotations": true,
-          "query": "SELECT \"title\", \"text\", \"severity\" FROM \"server_logs\" WHERE (\"server\" =~ /^${server:regex}$/) AND \"severity\" =~ /^(error|exception|assert)$/ AND $timeFilter ORDER BY time DESC LIMIT 300",
+          "query": "SELECT \"title\", \"text\", \"severity\" FROM \"server_logs\" WHERE (\"server\" =~ /^${server:regex}$/) AND \"severity\" =~ /^(warning|error|exception|assert)$/ AND $timeFilter ORDER BY time DESC LIMIT 300",
+          "titleColumn": "title",
+          "textColumn": "text",
+          "tagsColumn": "severity"
+        }
+      },
+      {
+        "name": "Other server logs",
+        "enable": false,
+        "hide": false,
+        "iconColor": "#73BF69",
+        "datasource": {
+          "type": "influxdb",
+          "uid": "$datasource"
+        },
+        "target": {
+          "refId": "OtherLogAnno",
+          "rawQuery": true,
+          "fromAnnotations": true,
+          "query": "SELECT \"title\", \"text\", \"severity\" FROM \"server_logs\" WHERE (\"server\" =~ /^${server:regex}$/) AND \"severity\" = 'info' AND $timeFilter ORDER BY time DESC LIMIT 300",
           "titleColumn": "title",
           "textColumn": "text",
           "tagsColumn": "severity"

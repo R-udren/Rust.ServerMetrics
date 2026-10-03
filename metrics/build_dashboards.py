@@ -9,6 +9,7 @@ DATASOURCE = {"type": "influxdb", "uid": "$datasource"}
 SERVER = '"server" =~ /^${server:regex}$/'
 PLUGIN = '"plugin" =~ /^${plugin:regex}$/ AND "framework" =~ /^${framework:regex}$/'
 SCOPE = f"({SERVER}) AND ({PLUGIN})"
+OTHER_LOG_FILTER = '"severity" =~ /^${other_logs:raw}$/'
 ANNOTATION = {
     "name": "Server events",
     "enable": True,
@@ -28,7 +29,7 @@ ANNOTATION = {
 
 
 LOG_ANNOTATION = {
-    "name": "Errors & exceptions",
+    "name": "Warnings & errors",
     "enable": True,
     "hide": False,
     "iconColor": "#FF637D",
@@ -37,12 +38,19 @@ LOG_ANNOTATION = {
         "refId": "LogAnno",
         "rawQuery": True,
         "fromAnnotations": True,
-        "query": f'SELECT "title", "text", "severity" FROM "server_logs" WHERE ({SERVER}) AND "severity" =~ /^(error|exception|assert)$/ AND $timeFilter ORDER BY time DESC LIMIT 300',
+        "query": f'SELECT "title", "text", "severity" FROM "server_logs" WHERE ({SERVER}) AND "severity" =~ /^(warning|error|exception|assert)$/ AND $timeFilter ORDER BY time DESC LIMIT 300',
         "titleColumn": "title",
         "textColumn": "text",
         "tagsColumn": "severity",
     },
 }
+
+OTHER_LOG_ANNOTATION = copy.deepcopy(LOG_ANNOTATION)
+OTHER_LOG_ANNOTATION.update(name="Other server logs", enable=False, iconColor="#73BF69")
+OTHER_LOG_ANNOTATION["target"]["refId"] = "OtherLogAnno"
+OTHER_LOG_ANNOTATION["target"]["query"] = (
+    f'SELECT "title", "text", "severity" FROM "server_logs" WHERE ({SERVER}) AND "severity" = \'info\' AND $timeFilter ORDER BY time DESC LIMIT 300'
+)
 
 
 def target(query, table=False, alias="$tag_plugin · $tag_framework"):
@@ -128,7 +136,7 @@ def build_logs(overview, freshness):
             "title": "Rust Logs & Exceptions",
             "version": 1,
             "editable": True,
-            "description": "Bounded redacted live Unity/framework logs with matching native server performance and event context.",
+            "description": "Live Unity/framework logs and optional server log files with matching server performance. Routine logs are hidden by default.",
             "tags": ["rust", "logs", "exceptions"],
             "annotations": {"list": []},
             "panels": [],
@@ -145,6 +153,16 @@ def build_logs(overview, freshness):
     )
     logs["templating"]["list"].extend(
         [
+            {
+                "name": "other_logs",
+                "label": "Show other logs",
+                "type": "custom",
+                "query": "Off : warning|error|exception|assert,On : .*",
+                "current": {
+                    "text": "Off",
+                    "value": "warning|error|exception|assert",
+                },
+            },
             {
                 "name": "severity",
                 "label": "Severity",
@@ -164,31 +182,19 @@ def build_logs(overview, freshness):
             },
         ]
     )
-    logs["panels"].append(
-        {
-            "id": 1,
-            "type": "text",
-            "title": "Live log capture scope",
-            "gridPos": {"x": 0, "y": 0, "w": 24, "h": 4},
-            "options": {
-                "mode": "markdown",
-                "content": "Warnings, errors, assertions and exceptions emitted through **Unity / the framework logger** after subscription. Ordinary plugin hook exceptions may have severity **error**. Routine info logs are opt-in. Raw RCON output, `Console.WriteLine`, file-only logs and startup history are outside coverage.\n\nMessages/stacks are truncated and redact player IDs, IPs, common credential patterns and the configured writer password. Capture is capped at 60 messages/minute by default, with a bounded queue. Check freshness and dropped logs; an empty table does not prove nothing happened. This is log context, not full tracing or exact exception counting.",
-            },
-        }
-    )
     for identifier, source_id, x in [(2, 6, 0), (3, 7, 12)]:
         value = copy.deepcopy(
             next(item for item in overview["panels"] if item["id"] == source_id)
         )
         value["id"] = identifier
-        value["gridPos"] = {"x": x, "y": 4, "w": 12, "h": 7}
+        value["gridPos"] = {"x": x, "y": 0, "w": 12, "h": 7}
         logs["panels"].append(value)
     log_table = panel(
         4,
-        "Live warnings, errors & exceptions · newest 300 matching entries",
-        f'SELECT "severity", "message" AS "Message", "source" AS "Source", "details_json" AS "Details" FROM "server_logs" WHERE ({SERVER}) AND "severity" =~ /^${{severity:regex}}$/ AND "message" =~ /(?i)${{log_search:regex}}/ AND $timeFilter ORDER BY time DESC LIMIT 300',
+        "Server logs · newest 300 matching entries",
+        f'SELECT "severity", "message" AS "Message", "origin" AS "Log stream", "source" AS "Source", "details_json" AS "Details" FROM "server_logs" WHERE ({SERVER}) AND ({OTHER_LOG_FILTER}) AND "severity" =~ /^${{severity:regex}}$/ AND "message" =~ /(?i)${{log_search:regex}}/ AND $timeFilter ORDER BY time DESC LIMIT 300',
         0,
-        11,
+        7,
         24,
         12,
         table=True,
@@ -224,15 +230,15 @@ def build_logs(overview, freshness):
         },
     ]
     log_table["description"] = (
-        "Compact summaries and cleaned application frames. Hover Details and open the inspector for formatted JSON with frame and source-line details. Filters match captured message text."
+        "Warnings/errors by default; Show other logs includes captured routine output. Enable collection separately with metricsadapter.logs all on. Hover Details for cleaned frames. File entries use collection time and may have no severity metadata. Startup history is skipped; only configured files are tailed."
     )
     logs["panels"].append(log_table)
     value = panel(
         5,
         "Captured messages by severity · per minute",
-        f'SELECT COUNT("message") FROM "server_logs" WHERE ({SERVER}) AND $timeFilter GROUP BY time(1m), "severity" fill(null)',
+        f'SELECT COUNT("message") FROM "server_logs" WHERE ({SERVER}) AND ({OTHER_LOG_FILTER}) AND $timeFilter GROUP BY time(1m), "severity" fill(null)',
         0,
-        23,
+        19,
         unit="short",
     )
     value["targets"][0]["alias"] = "$tag_severity"
@@ -243,20 +249,20 @@ def build_logs(overview, freshness):
             "Log capture drops · cumulative this adapter instance",
             f'SELECT LAST("logs_dropped") FROM "adapter_health" WHERE ({SERVER}) AND $timeFilter GROUP BY time($__interval) fill(null)',
             12,
-            23,
+            19,
             unit="short",
         )
     )
     fresh_logs = copy.deepcopy(freshness)
     fresh_logs["id"] = 7
-    fresh_logs["gridPos"] = {"x": 0, "y": 31, "w": 8, "h": 4}
+    fresh_logs["gridPos"] = {"x": 0, "y": 27, "w": 8, "h": 4}
     logs["panels"].append(fresh_logs)
     capture = panel(
         8,
         "Recent capture state · past minute",
-        f'SELECT LAST("log_capture") AS "Enabled", LAST("logs_dropped") AS "Dropped logs" FROM "adapter_health" WHERE ({SERVER}) AND time > now()-1m AND time <= now()',
+        f'SELECT LAST("log_capture") AS "Warnings/errors", LAST("all_log_capture") AS "Other logs", LAST("logs_dropped") AS "Dropped warnings/errors", LAST("info_logs_dropped") AS "Dropped other logs", LAST("log_file_errors") AS "File read failures" FROM "adapter_health" WHERE ({SERVER}) AND time > now()-1m AND time <= now()',
         8,
-        31,
+        27,
         16,
         4,
         table=True,
@@ -460,10 +466,15 @@ def main():
         annotations[:] = [
             item
             for item in annotations
-            if item.get("name") not in ("Server events", "Errors & exceptions")
+            if item.get("name")
+            not in ("Server events", "Errors & exceptions", "Warnings & errors")
         ]
         annotations.append(copy.deepcopy(ANNOTATION))
         annotations.append(copy.deepcopy(LOG_ANNOTATION))
+        annotations[:] = [
+            item for item in annotations if item.get("name") != "Other server logs"
+        ]
+        annotations.append(copy.deepcopy(OTHER_LOG_ANNOTATION))
         links = value.setdefault("links", [])
         links[:] = [
             item

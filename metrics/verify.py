@@ -190,10 +190,24 @@ def main():
         ):
             raise RuntimeError("Missing enabled timestamped server event annotations")
         if not any(
-            annotation.get("name") == "Errors & exceptions" and annotation.get("enable")
+            annotation.get("name") == "Warnings & errors" and annotation.get("enable")
             for annotation in item.get("annotations", {}).get("list", [])
         ):
             raise RuntimeError("Missing enabled error log annotations")
+        if not any(
+            annotation.get("name") == "Other server logs"
+            and annotation.get("enable") is False
+            for annotation in item.get("annotations", {}).get("list", [])
+        ):
+            raise RuntimeError(
+                "Other log annotations must be optional and off by default"
+            )
+    other_logs = next(
+        (item for item in logs["templating"]["list"] if item["name"] == "other_logs"),
+        None,
+    )
+    if not other_logs or other_logs["current"]["text"] != "Off":
+        raise RuntimeError("Routine log table visibility must default to Off")
     print(
         "PASS: plugin/log dashboards and event/error annotations on all four dashboards"
     )

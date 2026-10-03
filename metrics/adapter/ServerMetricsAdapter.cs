@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Globalization;
+using System.IO;
 using System.Linq;
 using System.Reflection;
 using System.Text;
@@ -12,7 +13,7 @@ using Oxide.Core.Plugins;
 
 namespace Oxide.Plugins
 {
-    [Info("Server Metrics Adapter", "R-udren", "0.2.0")]
+    [Info("Server Metrics Adapter", "R-udren", "0.3.0")]
     [Description("Read-only framework counters and bounded local event telemetry; no Harmony patches")]
     public class ServerMetricsAdapter : RustPlugin
     {
@@ -46,10 +47,18 @@ namespace Oxide.Plugins
         private int[] _packetBytes;
         private readonly object _logGate = new();
         private readonly Queue<CapturedLog> _logs = new();
+        private readonly Queue<CapturedLog> _infoLogs = new();
+        private readonly List<ServerLogTail> _logFiles = new();
+        private readonly Dictionary<string, LogObservation> _logObservations = new(StringComparer.Ordinal);
         private UnityEngine.Application.LogCallback _logCallback;
         private long _logMinute = -1;
         private int _logsThisMinute;
+        private int _infoLogsThisMinute;
         private long _logsDropped;
+        private long _infoLogsDropped;
+        private long _logFileErrors;
+        private int _filePollInFlight;
+        private int _logFileGeneration;
         private long _lastLogTimestamp;
         private static readonly Regex SteamId = new(@"\b\d{17}\b", RegexOptions.Compiled);
         private static readonly Regex Ipv4 = new(@"\b(?:\d{1,3}\.){3}\d{1,3}(?::\d{1,5})?\b", RegexOptions.Compiled);
@@ -70,6 +79,9 @@ namespace Oxide.Plugins
             public int QueueLimit = 1000;
             public bool CaptureLogs = true;
             public bool CaptureInfoLogs = false;
+            public bool CaptureAllServerLogs = false;
+            public string[] ServerLogFiles = { "server.log" };
+            public int InfoLogLimitPerMinute = 120;
             public int LogLimitPerMinute = 60;
             public bool NativeInvokeDetails = true;
             public bool NativePacketDetails = true;
@@ -105,6 +117,12 @@ namespace Oxide.Plugins
                 throw new ArgumentException("Metrics sampling must be 2–60 seconds and queue limit 100–10000");
             if (settings.LogLimitPerMinute < 1 || settings.LogLimitPerMinute > 600)
                 throw new ArgumentException("Log limit must be 1–600 messages per minute");
+            if (settings.InfoLogLimitPerMinute < 1 || settings.InfoLogLimitPerMinute > 600)
+                throw new ArgumentException("Info log limit must be 1–600 messages per minute");
+            if (settings.ServerLogFiles == null || settings.ServerLogFiles.Length > 8 ||
+                settings.ServerLogFiles.Any(path => string.IsNullOrWhiteSpace(path) || path.Length > 1000 || path.Any(char.IsControl)))
+                throw new ArgumentException("ServerLogFiles must contain at most eight valid paths (or be empty)");
+            foreach (var path in settings.ServerLogFiles) _ = Path.GetFullPath(path);
         }
 
         private void OnServerInitialized()
@@ -126,6 +144,7 @@ namespace Oxide.Plugins
                 _logCallback = CaptureLog;
                 UnityEngine.Application.logMessageReceivedThreaded += _logCallback;
             }
+            ConfigureLogFiles();
             Observe(() => Event("adapter_started", "Metrics adapter started", "Collector start or reload; this does not establish a server restart."));
             Observe(Poll);
             timer.Every(_settings.SampleSeconds, () => Observe(Poll));
@@ -196,11 +215,14 @@ namespace Oxide.Plugins
             foreach (var type in _readers.Keys.Where(type => !activeTypes.Contains(type)).ToArray()) _readers.Remove(type);
             Observe(() => PollServer(timestamp));
             Observe(() => PollNativeDetails(timestamp));
+            Observe(PollLogFiles);
             Observe(DrainLogs);
             _lastPollMs = _clock.Elapsed.TotalMilliseconds - started;
             Add("adapter_health", "queued=" + _queue.Count + "i,dropped=" + _dropped + "i,uploaded=" + _uploaded +
                 "i,upload_failures=" + _failures + "i,observer_errors=" + _observerErrors + "i,plugins=" + seen.Count +
                 "i,logs_dropped=" + Interlocked.Read(ref _logsDropped) + "i,log_capture=" + Bool(_settings.CaptureLogs) +
+                ",all_log_capture=" + Bool(_settings.CaptureLogs && _settings.CaptureAllServerLogs) +
+                ",info_logs_dropped=" + Interlocked.Read(ref _infoLogsDropped) + "i,log_file_errors=" + Interlocked.Read(ref _logFileErrors) + "i" +
                 ",poll_ms=" + Number(_lastPollMs), timestamp);
         }
 
@@ -385,7 +407,8 @@ namespace Oxide.Plugins
                 UnityEngine.Application.logMessageReceivedThreaded -= _logCallback;
                 _logCallback = null;
             }
-            lock (_logGate) _logs.Clear();
+            lock (_logGate) { _logs.Clear(); _infoLogs.Clear(); _logObservations.Clear(); }
+            _logFiles.Clear();
             _queue.Clear();
             _samples.Clear();
             _readers.Clear();
@@ -407,6 +430,8 @@ namespace Oxide.Plugins
                 " queued=" + _queue.Count + " in_flight=" + _inFlight + " uploaded_batches=" + _uploaded +
                 " dropped_points=" + _dropped + " upload_failures=" + _failures + " observer_errors=" + _observerErrors +
                 " log_capture=" + _settings.CaptureLogs + " dropped_logs=" + Interlocked.Read(ref _logsDropped) +
+                " all_log_capture=" + _settings.CaptureAllServerLogs + " dropped_info_logs=" + Interlocked.Read(ref _infoLogsDropped) +
+                " log_file_errors=" + Interlocked.Read(ref _logFileErrors) +
                 " last_poll_ms=" + Number(_lastPollMs));
         }
 
@@ -486,12 +511,142 @@ namespace Oxide.Plugins
             public string Stack;
             public string Source;
             public string Details;
+            public string Origin;
+        }
+
+        [ConsoleCommand("metricsadapter.logs")]
+        private void LogCapture(ConsoleSystem.Arg arg)
+        {
+            if (arg.Connection != null) return;
+            if (arg.Args == null || arg.Args.Length != 2 || arg.Args[0] != "all" ||
+                (arg.Args[1] != "on" && arg.Args[1] != "off"))
+            { arg.ReplyWith("Usage: metricsadapter.logs all on|off"); return; }
+            _settings.CaptureAllServerLogs = arg.Args[1] == "on";
+            Config.WriteObject(_settings, true);
+            ConfigureLogFiles();
+            Observe(PollLogFiles);
+            arg.ReplyWith("Other server log collection " + (_settings.CaptureAllServerLogs ? "enabled" : "disabled") +
+                "; warnings and errors retain their existing setting.");
+        }
+
+        private void ConfigureLogFiles()
+        {
+            Interlocked.Increment(ref _logFileGeneration);
+            _logFiles.Clear();
+            if (!_settings.CaptureLogs || !_settings.CaptureAllServerLogs) return;
+            foreach (var path in _settings.ServerLogFiles.Select(Path.GetFullPath).Distinct(StringComparer.OrdinalIgnoreCase))
+                _logFiles.Add(new ServerLogTail(path));
+        }
+
+        private void PollLogFiles()
+        {
+            if (_logFiles.Count == 0 || Interlocked.CompareExchange(ref _filePollInFlight, 1, 0) != 0) return;
+            var files = _logFiles.ToArray();
+            var generation = Volatile.Read(ref _logFileGeneration);
+            try
+            {
+                ThreadPool.QueueUserWorkItem(_ =>
+                {
+                    try
+                    {
+                        foreach (var file in files)
+                        {
+                            if (!_running || generation != Volatile.Read(ref _logFileGeneration)) return;
+                            try
+                            {
+                                file.Read(line =>
+                                {
+                                    if (generation == Volatile.Read(ref _logFileGeneration))
+                                        CaptureLogEntry(line, "", FileLogType(line), "file:" + Path.GetFileName(file.Path));
+                                });
+                            }
+                            catch (IOException) { Interlocked.Increment(ref _logFileErrors); }
+                            catch (UnauthorizedAccessException) { Interlocked.Increment(ref _logFileErrors); }
+                        }
+                    }
+                    catch (Exception) { Interlocked.Increment(ref _logFileErrors); }
+                    finally { Interlocked.Exchange(ref _filePollInFlight, 0); }
+                });
+            }
+            catch { Interlocked.Exchange(ref _filePollInFlight, 0); throw; }
+        }
+
+        public static UnityEngine.LogType FileLogType(string line)
+        {
+            var value = (line ?? "").TrimStart();
+            if (Regex.IsMatch(value, @"^(?:\[[^\]]{1,40}\]\s*){0,2}\[?(?:warning|warn)\b", RegexOptions.IgnoreCase)) return UnityEngine.LogType.Warning;
+            if (Regex.IsMatch(value, @"^(?:\[[^\]]{1,40}\]\s*){0,2}\[?(?:error|erro|exception|assert)\b", RegexOptions.IgnoreCase)) return UnityEngine.LogType.Error;
+            return UnityEngine.LogType.Log;
+        }
+
+        public sealed class ServerLogTail
+        {
+            public string Path { get; }
+            private long _offset = -1;
+            private DateTime _created;
+            private readonly Decoder _decoder = Encoding.UTF8.GetDecoder();
+            private readonly StringBuilder _pending = new();
+            private bool _discardLine;
+            private readonly byte[] _buffer = new byte[4096];
+            private readonly char[] _characters = new char[4098];
+
+            public ServerLogTail(string path) { Path = path; }
+
+            public void Read(Action<string> capture)
+            {
+                using var file = new FileStream(Path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+                var created = File.GetCreationTimeUtc(Path);
+                if (_offset < 0)
+                {
+                    _offset = file.Length;
+                    _created = created;
+                    if (_offset > 0) { file.Seek(-1, SeekOrigin.End); _discardLine = file.ReadByte() != '\n'; }
+                    return;
+                }
+                if (file.Length < _offset || created != _created)
+                { _offset = 0; _pending.Clear(); _decoder.Reset(); _discardLine = false; }
+                _created = created;
+                file.Seek(_offset, SeekOrigin.Begin);
+                var remaining = 65536;
+                while (remaining > 0)
+                {
+                    var read = file.Read(_buffer, 0, Math.Min(_buffer.Length, remaining));
+                    if (read == 0) return;
+                    _offset += read;
+                    remaining -= read;
+                    var count = _decoder.GetChars(_buffer, 0, read, _characters, 0);
+                    for (var index = 0; index < count; index++)
+                    {
+                        var character = _characters[index];
+                        if (character == '\n')
+                        {
+                            if (!_discardLine && _pending.Length > 0) capture(_pending.ToString());
+                            _pending.Clear();
+                            _discardLine = false;
+                        }
+                        else if (character != '\r' && !_discardLine && _pending.Length < 4000) _pending.Append(character);
+                    }
+                }
+            }
+        }
+
+        private sealed class LogObservation
+        {
+            public string Origin;
+            public long Timestamp;
         }
 
         private void CaptureLog(string condition, string stackTrace, UnityEngine.LogType type)
         {
+            CaptureLogEntry(condition, stackTrace, type, "unity");
+        }
+
+        private void CaptureLogEntry(string condition, string stackTrace, UnityEngine.LogType type, string origin)
+        {
             if (!_running || string.IsNullOrWhiteSpace(condition)) return;
-            if (type == UnityEngine.LogType.Log && !_settings.CaptureInfoLogs) return;
+            if (origin.StartsWith("file:", StringComparison.Ordinal) && !_settings.CaptureAllServerLogs) return;
+            var info = type == UnityEngine.LogType.Log;
+            if (info && !_settings.CaptureInfoLogs && !_settings.CaptureAllServerLogs) return;
             var searchLength = Math.Min(condition.Length, 4000);
             if (condition.IndexOf("ServerMetricsAdapter", 0, searchLength, StringComparison.OrdinalIgnoreCase) >= 0 ||
                 condition.IndexOf("[Server Metrics Adapter]", 0, searchLength, StringComparison.OrdinalIgnoreCase) >= 0) return;
@@ -505,22 +660,30 @@ namespace Oxide.Plugins
                 {
                     if (!_running) return;
                     var minute = timestamp / 60000;
-                    if (minute != _logMinute) { _logMinute = minute; _logsThisMinute = 0; }
-                    if (_logsThisMinute >= _settings.LogLimitPerMinute || _logs.Count >= 200)
+                    if (minute != _logMinute) { _logMinute = minute; _logsThisMinute = 0; _infoLogsThisMinute = 0; }
+                    var queue = info ? _infoLogs : _logs;
+                    if ((info ? _infoLogsThisMinute >= _settings.InfoLogLimitPerMinute : _logsThisMinute >= _settings.LogLimitPerMinute) || queue.Count >= 200)
                     {
-                        Interlocked.Increment(ref _logsDropped);
+                        if (info) Interlocked.Increment(ref _infoLogsDropped);
+                        else Interlocked.Increment(ref _logsDropped);
                         return;
                     }
-                    _logsThisMinute++;
                     var formatted = FormatLog(condition, stackTrace, _settings.Password);
-                    _logs.Enqueue(new CapturedLog
+                    if (_logObservations.TryGetValue(formatted.Message, out LogObservation previous) &&
+                        previous.Origin != origin && timestamp - previous.Timestamp < 10000) return;
+                    if (_logObservations.Count >= 512) _logObservations.Clear();
+                    _logObservations[formatted.Message] = new LogObservation { Origin = origin, Timestamp = timestamp };
+                    if (info) _infoLogsThisMinute++;
+                    else _logsThisMinute++;
+                    queue.Enqueue(new CapturedLog
                     {
                         Timestamp = timestamp,
                         Severity = severity,
                         Message = formatted.Message,
                         Stack = string.Join(" | ", formatted.Frames),
                         Source = formatted.Source,
-                        Details = formatted.Details
+                        Details = formatted.Details,
+                        Origin = origin
                     });
                 }
             }
@@ -534,12 +697,12 @@ namespace Oxide.Plugins
                 CapturedLog log;
                 lock (_logGate)
                 {
-                    if (_logs.Count == 0) return;
-                    log = _logs.Dequeue();
+                    if (_logs.Count == 0 && _infoLogs.Count == 0) return;
+                    log = _logs.Count > 0 ? _logs.Dequeue() : _infoLogs.Dequeue();
                 }
                 _lastLogTimestamp = Math.Max(log.Timestamp, _lastLogTimestamp + 1);
                 Add("server_logs", "title=" + Quote(log.Severity + " log") + ",message=" + Quote(log.Message) +
-                    ",summary=" + Quote(log.Message) + ",source=" + Quote(log.Source) + ",details_json=" + Quote(log.Details, 6000) +
+                    ",summary=" + Quote(log.Message) + ",source=" + Quote(log.Source) + ",origin=" + Quote(log.Origin) + ",details_json=" + Quote(log.Details, 6000) +
                     ",text=" + Quote(log.Message) + ",stack_trace=" + Quote(log.Stack) + ",observed_utc_ms=" + log.Timestamp + "i",
                     _lastLogTimestamp, ",severity=" + log.Severity);
             }

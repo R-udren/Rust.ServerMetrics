@@ -59,6 +59,9 @@ def main():
         "QueueLimit": 1000,
         "CaptureLogs": True,
         "CaptureInfoLogs": False,
+        "CaptureAllServerLogs": False,
+        "ServerLogFiles": ["server.log"],
+        "InfoLogLimitPerMinute": 120,
         "LogLimitPerMinute": 60,
         "NativeInvokeDetails": True,
         "NativePacketDetails": True,
@@ -66,6 +69,12 @@ def main():
     config_folder = "configs" if framework.name == "carbon" else "config"
     config_path = framework / f"{config_folder}/{NAME}.json"
     plugin_path = framework / f"plugins/{NAME}.cs"
+    if config_path.exists():
+        existing = json.loads(config_path.read_text(encoding="utf-8-sig"))
+        if not isinstance(existing, dict):
+            raise ValueError("Existing adapter config must be a JSON object")
+        configuration.update(existing)
+        configuration["Password"] = values["INFLUXDB_WRITE_USER_PASSWORD"]
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
     backup = ROOT / f"private/adapter-backups/{stamp}"
     for path in (config_path, plugin_path):

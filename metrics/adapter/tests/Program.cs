@@ -122,6 +122,73 @@ UnityEngine.Application.Emit("[Server Metrics Adapter] failed upload", "", Unity
 UnityEngine.Application.Emit("Routine info message", "", UnityEngine.LogType.Log);
 Invoke(adapter, "DrainLogs");
 Check(stored.Count == countBefore, "Own diagnostics and default info logs excluded to avoid recursion/noise");
+var settings = (Settings)adapter.Config.Value;
+settings.CaptureAllServerLogs = true;
+settings.InfoLogLimitPerMinute = 2;
+Set(adapter, "_logMinute", -1L);
+stored.Clear();
+UnityEngine.Application.Emit("Routine message one", "", UnityEngine.LogType.Log);
+UnityEngine.Application.Emit("Routine message two", "", UnityEngine.LogType.Log);
+UnityEngine.Application.Emit("Routine message over quota", "", UnityEngine.LogType.Log);
+UnityEngine.Application.Emit("Warning after routine burst", "", UnityEngine.LogType.Warning);
+Invoke(adapter, "DrainLogs");
+Check(stored.Count(line => line.Contains(",severity=info")) == 2 &&
+    stored.Any(line => line.Contains(",severity=warning")) && (long)Field(adapter, "_infoLogsDropped") == 1,
+    "Optional routine logs have a separate quota and cannot exhaust warning capture");
+Set(adapter, "_logMinute", -1L);
+stored.Clear();
+UnityEngine.Application.Emit("Mirrored entry", "", UnityEngine.LogType.Log);
+Invoke(adapter, "CaptureLogEntry", "Mirrored entry", "", UnityEngine.LogType.Log, "file:server.log");
+UnityEngine.Application.Emit("Mirrored entry", "", UnityEngine.LogType.Log);
+Invoke(adapter, "DrainLogs");
+Check(stored.Count == 2 && stored.All(line => line.Contains("origin=\"unity\"")),
+    "Unity/file duplicates suppressed while repeated messages within one stream remain");
+settings.CaptureAllServerLogs = false;
+Set(adapter, "_logMinute", -1L);
+var routineBefore = stored.Count;
+UnityEngine.Application.Emit("Info disabled again", "", UnityEngine.LogType.Log);
+Invoke(adapter, "DrainLogs");
+Check(stored.Count == routineBefore, "Routine collection can be disabled independently of warnings/errors");
+
+var tailFolder = Path.Combine(Path.GetTempPath(), "metrics-tail-" + Guid.NewGuid().ToString("N"));
+Directory.CreateDirectory(tailFolder);
+try
+{
+    var logPath = Path.Combine(tailFolder, "server.log");
+    File.WriteAllText(logPath, "Old startup history\n");
+    var tail = new ServerLogTail(logPath);
+    var lines = new List<string>();
+    tail.Read(lines.Add);
+    Check(lines.Count == 0, "File capture starts at EOF without importing startup history");
+    File.AppendAllText(logPath, "new message\npartial");
+    tail.Read(lines.Add);
+    Check(lines.Count == 1 && lines[0] == "new message", "Partial file lines wait for their terminating newline");
+    File.AppendAllText(logPath, " entry\n");
+    tail.Read(lines.Add);
+    Check(lines.Last() == "partial entry", "File tail preserves partial lines between polls");
+    File.WriteAllText(logPath, "reset\n");
+    tail.Read(lines.Add);
+    Check(lines.Last() == "reset", "File truncation resets the cursor safely");
+    File.Move(logPath, logPath + ".old");
+    File.WriteAllText(logPath, "rotated\n");
+    File.SetCreationTimeUtc(logPath, DateTime.UtcNow.AddSeconds(10));
+    tail.Read(lines.Add);
+    Check(lines.Last() == "rotated", "File replacement is read without locking log rotation");
+    File.AppendAllText(logPath, new string('x', 80000) + "\n");
+    var lineCount = lines.Count;
+    tail.Read(lines.Add);
+    Check(lines.Count == lineCount, "Per-poll file read budget prevents unbounded disk work");
+    tail.Read(lines.Add);
+    Check(lines.Last().Length == 4000, "Oversized lines have bounded memory and stored text");
+    File.Delete(logPath);
+    try { tail.Read(lines.Add); throw new Exception("Missing file unexpectedly read"); }
+    catch (FileNotFoundException) { Check(true, "Missing log file fails explicitly for health reporting"); }
+    Check(FileLogType("[WARN] warning") == UnityEngine.LogType.Warning &&
+        FileLogType("[12:00:00] [ERRO] failed") == UnityEngine.LogType.Error &&
+        FileLogType("player text includes error") == UnityEngine.LogType.Log,
+        "File severity uses known prefixes and leaves unstructured messages as routine logs");
+}
+finally { Directory.Delete(tailFolder, true); }
 var queue = (Queue<string>)Field(adapter, "_queue");
 queue.Clear();
 for (var index = 0; index < 200; index++)

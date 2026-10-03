@@ -53,6 +53,16 @@
         "options": []
       },
       {
+        "name": "other_logs",
+        "label": "Show other logs",
+        "type": "custom",
+        "query": "Off : warning|error|exception|assert,On : .*",
+        "current": {
+          "text": "Off",
+          "value": "warning|error|exception|assert"
+        }
+      },
+      {
         "name": "severity",
         "label": "Severity",
         "type": "custom",
@@ -82,7 +92,7 @@
   "title": "Rust Logs & Exceptions",
   "version": 1,
   "editable": true,
-  "description": "Bounded redacted live Unity/framework logs with matching native server performance and event context. Warnings, errors, assertions and exceptions emitted through **Unity / the framework logger** after subscription. Ordinary plugin hook exceptions may have severity **error**. Routine info logs are opt-in. Raw RCON output, `Console.WriteLine`, file-only logs and startup history are outside coverage.\n\nMessages/stacks are truncated and redact player IDs, IPs, common credential patterns and the configured writer password. Capture is capped at 60 messages/minute by default, with a bounded queue. Check freshness and dropped logs; an empty table does not prove nothing happened. This is log context, not full tracing or exact exception counting.",
+  "description": "Live Unity/framework logs and optional server log files with matching server performance. Routine logs are hidden by default.",
   "tags": ["rust", "logs", "exceptions"],
   "annotations": {
     "list": [
@@ -106,7 +116,7 @@
         }
       },
       {
-        "name": "Errors & exceptions",
+        "name": "Warnings & errors",
         "enable": true,
         "hide": false,
         "iconColor": "#FF637D",
@@ -118,7 +128,26 @@
           "refId": "LogAnno",
           "rawQuery": true,
           "fromAnnotations": true,
-          "query": "SELECT \"title\", \"text\", \"severity\" FROM \"server_logs\" WHERE (\"server\" =~ /^${server:regex}$/) AND \"severity\" =~ /^(error|exception|assert)$/ AND $timeFilter ORDER BY time DESC LIMIT 300",
+          "query": "SELECT \"title\", \"text\", \"severity\" FROM \"server_logs\" WHERE (\"server\" =~ /^${server:regex}$/) AND \"severity\" =~ /^(warning|error|exception|assert)$/ AND $timeFilter ORDER BY time DESC LIMIT 300",
+          "titleColumn": "title",
+          "textColumn": "text",
+          "tagsColumn": "severity"
+        }
+      },
+      {
+        "name": "Other server logs",
+        "enable": false,
+        "hide": false,
+        "iconColor": "#73BF69",
+        "datasource": {
+          "type": "influxdb",
+          "uid": "$datasource"
+        },
+        "target": {
+          "refId": "OtherLogAnno",
+          "rawQuery": true,
+          "fromAnnotations": true,
+          "query": "SELECT \"title\", \"text\", \"severity\" FROM \"server_logs\" WHERE (\"server\" =~ /^${server:regex}$/) AND \"severity\" = 'info' AND $timeFilter ORDER BY time DESC LIMIT 300",
           "titleColumn": "title",
           "textColumn": "text",
           "tagsColumn": "severity"
@@ -313,7 +342,7 @@
     },
     {
       "id": 4,
-      "title": "Live warnings, errors & exceptions · newest 300 matching entries",
+      "title": "Server logs · newest 300 matching entries",
       "type": "table",
       "datasource": {
         "type": "influxdb",
@@ -333,7 +362,7 @@
             "uid": "$datasource"
           },
           "rawQuery": true,
-          "query": "SELECT \"severity\", \"message\" AS \"Message\", \"source\" AS \"Source\", \"details_json\" AS \"Details\" FROM \"server_logs\" WHERE (\"server\" =~ /^${server:regex}$/) AND \"severity\" =~ /^${severity:regex}$/ AND \"message\" =~ /(?i)${log_search:regex}/ AND $timeFilter ORDER BY time DESC LIMIT 300",
+          "query": "SELECT \"severity\", \"message\" AS \"Message\", \"origin\" AS \"Log stream\", \"source\" AS \"Source\", \"details_json\" AS \"Details\" FROM \"server_logs\" WHERE (\"server\" =~ /^${server:regex}$/) AND (\"severity\" =~ /^${other_logs:raw}$/) AND \"severity\" =~ /^${severity:regex}$/ AND \"message\" =~ /(?i)${log_search:regex}/ AND $timeFilter ORDER BY time DESC LIMIT 300",
           "resultFormat": "table",
           "alias": "$tag_plugin · $tag_framework"
         }
@@ -430,7 +459,7 @@
           "show": false
         }
       },
-      "description": "Compact summaries and cleaned application frames. Hover Details and open the inspector for formatted JSON with frame and source-line details. Filters match captured message text."
+      "description": "Warnings/errors by default; Show other logs includes captured routine output. Enable collection separately with metricsadapter.logs all on. Hover Details for cleaned frames. File entries use collection time and may have no severity metadata. Startup history is skipped; only configured files are tailed."
     },
     {
       "id": 5,
@@ -454,7 +483,7 @@
             "uid": "$datasource"
           },
           "rawQuery": true,
-          "query": "SELECT COUNT(\"message\") FROM \"server_logs\" WHERE (\"server\" =~ /^${server:regex}$/) AND $timeFilter GROUP BY time(1m), \"severity\" fill(null)",
+          "query": "SELECT COUNT(\"message\") FROM \"server_logs\" WHERE (\"server\" =~ /^${server:regex}$/) AND (\"severity\" =~ /^${other_logs:raw}$/) AND $timeFilter GROUP BY time(1m), \"severity\" fill(null)",
           "resultFormat": "time_series",
           "alias": "$tag_severity"
         }
@@ -628,7 +657,7 @@
             "uid": "$datasource"
           },
           "rawQuery": true,
-          "query": "SELECT LAST(\"log_capture\") AS \"Enabled\", LAST(\"logs_dropped\") AS \"Dropped logs\" FROM \"adapter_health\" WHERE (\"server\" =~ /^${server:regex}$/) AND time > now()-1m AND time <= now()",
+          "query": "SELECT LAST(\"log_capture\") AS \"Warnings/errors\", LAST(\"all_log_capture\") AS \"Other logs\", LAST(\"logs_dropped\") AS \"Dropped warnings/errors\", LAST(\"info_logs_dropped\") AS \"Dropped other logs\", LAST(\"log_file_errors\") AS \"File read failures\" FROM \"adapter_health\" WHERE (\"server\" =~ /^${server:regex}$/) AND time > now()-1m AND time <= now()",
           "resultFormat": "table",
           "alias": "$tag_plugin · $tag_framework"
         }
