@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net48</TargetFramework>
+    <LangVersion>9</LangVersion>
+    <Nullable>disable</Nullable>
+    <DisableImplicitFrameworkReferences>true</DisableImplicitFrameworkReferences>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <FrameworkFlavor Condition="'$(FrameworkFlavor)' == ''">Carbon</FrameworkFlavor>
+    <GameManaged>$(MSBuildThisFileDirectory)..\..\..\rust-game-server\Server\RustDedicated_Data\Managed</GameManaged>
+    <CarbonManaged>$(MSBuildThisFileDirectory)..\..\..\rust-game-server\Server\carbon\managed</CarbonManaged>
+    <OxideManaged>$(MSBuildThisFileDirectory)..\..\..\rust-game-server\oxide_backup_PreInstall\oxide_dlls</OxideManaged>
+    <OutputPath>..\private\adapter-build\$(FrameworkFlavor)\</OutputPath>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="ServerMetricsAdapter.cs" />
+    <GameReference Include="mscorlib;System;System.Core;Newtonsoft.Json;Assembly-CSharp;Assembly-CSharp-firstpass;UnityEngine.CoreModule;Facepunch.Console;Facepunch.System;Facepunch.Network;Facepunch.UnityEngine;Rust.Data;Rust.Global" />
+    <Reference Include="@(GameReference->'$(GameManaged)\%(Identity).dll')" />
+    <Reference Include="$(CarbonManaged)\Carbon.Common.dll" Condition="'$(FrameworkFlavor)' == 'Carbon'" />
+    <Reference Include="$(CarbonManaged)\Carbon.SDK.dll" Condition="'$(FrameworkFlavor)' == 'Carbon'" />
+    <Reference Include="$(OxideManaged)\Oxide.*.dll" Condition="'$(FrameworkFlavor)' == 'Oxide'" />
+  </ItemGroup>
+  <Target Name="ClearReferenceCopyLocalPaths" AfterTargets="ResolveAssemblyReferences">
+    <ItemGroup><ReferenceCopyLocalPaths Remove="@(ReferenceCopyLocalPaths)" /></ItemGroup>
+  </Target>
+</Project>

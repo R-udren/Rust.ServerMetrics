@@ -1,0 +1,8 @@
+.env
+private/
+upstream/*.dll
+upstream/Grafana-Dashboard.json
+__pycache__/
+adapter/obj/
+adapter/tests/obj/
+adapter/tests/bin/

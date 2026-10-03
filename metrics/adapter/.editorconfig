@@ -1,0 +1,41 @@
+root = true
+
+[*.cs]
+charset = utf-8
+indent_style = space
+indent_size = 4
+end_of_line = crlf
+insert_final_newline = true
+
+# Both frameworks discover ordinary source plugins in this exact namespace.
+dotnet_style_namespace_match_folder = false
+
+# Runtime is the game's .NET Framework 4.8; System.Range is unavailable there.
+csharp_style_prefer_range_operator = false
+
+# Installed source must also compile with the framework's C# 9 compiler.
+csharp_style_namespace_declarations = block_scoped
+csharp_style_prefer_primary_constructors = false
+dotnet_style_prefer_collection_expression = never
+
+# Linked into the net10 test runner, but installed source runs on net48/C# 9.
+dotnet_diagnostic.SYSLIB1045.severity = none
+
+[ServerMetricsAdapter.cs]
+# The net10 runner must not rewrite linked C# 9/net48 source into newer syntax/APIs.
+dotnet_diagnostic.IDE0300.severity = none
+dotnet_diagnostic.IDE0301.severity = none
+dotnet_diagnostic.IDE0305.severity = none
+dotnet_diagnostic.IDE0306.severity = none
+dotnet_diagnostic.IDE0330.severity = none
+# Contains(char) and Contains(string, StringComparison) are unavailable on net48.
+dotnet_diagnostic.CA1847.severity = none
+dotnet_diagnostic.CA2249.severity = none
+
+[tests/FrameworkStubs.cs]
+# These signatures/names/global mutable counters mirror actual game/framework APIs.
+dotnet_diagnostic.IDE0060.severity = none
+dotnet_diagnostic.IDE1006.severity = none
+dotnet_diagnostic.CA1050.severity = none
+dotnet_diagnostic.CA2211.severity = none
+dotnet_diagnostic.CA1822.severity = none

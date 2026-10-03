@@ -1,0 +1,4 @@
+CREATE DATABASE "rust-server-metrics"
+GRANT WRITE ON "rust-server-metrics" TO "rust_writer"
+GRANT READ ON "rust-server-metrics" TO "grafana_reader"
+CREATE RETENTION POLICY "local_14d" ON "rust-server-metrics" DURATION 14d REPLICATION 1 SHARD DURATION 1d DEFAULT

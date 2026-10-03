@@ -1,0 +1,657 @@
+{
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "refresh": "10s",
+  "time": {
+    "from": "now-15m",
+    "to": "now"
+  },
+  "timepicker": {
+    "hidden": false,
+    "refresh_intervals": ["10s", "30s", "1m", "5m"],
+    "time_options": ["5m", "15m", "1h", "6h", "12h", "24h", "2d", "7d"]
+  },
+  "templating": {
+    "list": [
+      {
+        "name": "datasource",
+        "type": "datasource",
+        "query": "influxdb",
+        "refresh": 1,
+        "hide": 2,
+        "includeAll": false,
+        "multi": false,
+        "skipUrlSync": false,
+        "current": {
+          "text": "Rust Local Metrics",
+          "value": "rust-local-influxdb",
+          "selected": true
+        },
+        "options": []
+      },
+      {
+        "name": "server",
+        "label": "Server",
+        "type": "query",
+        "datasource": {
+          "type": "influxdb",
+          "uid": "$datasource"
+        },
+        "query": "SHOW TAG VALUES FROM \"framerate\" WITH KEY = \"server\"",
+        "definition": "SHOW TAG VALUES FROM \"framerate\" WITH KEY = \"server\"",
+        "refresh": 1,
+        "hide": 0,
+        "includeAll": false,
+        "multi": false,
+        "sort": 1,
+        "skipUrlSync": false,
+        "current": {
+          "text": "local-dev",
+          "value": "local-dev",
+          "selected": true
+        },
+        "options": []
+      },
+      {
+        "name": "framework",
+        "label": "Framework",
+        "type": "query",
+        "datasource": {
+          "type": "influxdb",
+          "uid": "$datasource"
+        },
+        "query": "SHOW TAG VALUES FROM \"plugin_runtime\" WITH KEY = \"framework\" WHERE (\"server\" =~ /^${server:regex}$/)",
+        "refresh": 1,
+        "includeAll": true,
+        "allValue": ".*",
+        "multi": false,
+        "current": {
+          "text": "All",
+          "value": "$__all"
+        }
+      },
+      {
+        "name": "plugin",
+        "label": "Plugin",
+        "type": "query",
+        "datasource": {
+          "type": "influxdb",
+          "uid": "$datasource"
+        },
+        "query": "SHOW TAG VALUES FROM \"plugin_runtime\" WITH KEY = \"plugin\" WHERE (\"server\" =~ /^${server:regex}$/) AND \"framework\" =~ /^${framework:regex}$/",
+        "refresh": 1,
+        "includeAll": true,
+        "allValue": ".*",
+        "multi": true,
+        "current": {
+          "text": "All",
+          "value": "$__all"
+        }
+      }
+    ]
+  },
+  "id": null,
+  "uid": "rust-plugin-impact",
+  "title": "Rust Plugin Impact",
+  "version": 1,
+  "editable": true,
+  "graphTooltip": 1,
+  "tags": ["rust", "plugins", "carbon", "oxide"],
+  "description": "Framework tracked elapsed time, limited by each framework's instrumentation. Includes event context and collector health; not total CPU or attributable FPS loss. **Carbon:** synchronous dispatched hook elapsed time; calls, framework lag spikes, and exceptions where counted. Timers, plugin commands, and background work are outside this timing counter.\n\n**Oxide:** framework tracked hooks, timers, web-request callbacks, and plugin commands. Hook counts / lag spikes / exceptions are **unavailable**, not zero.\n\nThese are **wall-clock elapsed times**, with framework-specific nesting behavior; they are not exact CPU time, allocation counts, all plugin work, or attributable FPS loss. Do not sum plugins into server CPU utilization. Harmony mods (including RChecker) are outside this adapter. First samples and counter resets have no rate. Core plugins and this adapter are excluded. Events provide context, not proof of causation.",
+  "annotations": {
+    "list": [
+      {
+        "name": "Server events",
+        "enable": true,
+        "hide": false,
+        "iconColor": "#FFB357",
+        "datasource": {
+          "type": "influxdb",
+          "uid": "$datasource"
+        },
+        "target": {
+          "refId": "Anno",
+          "rawQuery": true,
+          "fromAnnotations": true,
+          "query": "SELECT \"title\", \"text\", \"tags\" FROM \"server_events\" WHERE (\"server\" =~ /^${server:regex}$/) AND $timeFilter ORDER BY time DESC LIMIT 1000",
+          "titleColumn": "title",
+          "textColumn": "text",
+          "tagsColumn": "tags"
+        }
+      },
+      {
+        "name": "Errors & exceptions",
+        "enable": true,
+        "hide": false,
+        "iconColor": "#FF637D",
+        "datasource": {
+          "type": "influxdb",
+          "uid": "$datasource"
+        },
+        "target": {
+          "refId": "LogAnno",
+          "rawQuery": true,
+          "fromAnnotations": true,
+          "query": "SELECT \"title\", \"text\", \"severity\" FROM \"server_logs\" WHERE (\"server\" =~ /^${server:regex}$/) AND \"severity\" =~ /^(error|exception|assert)$/ AND $timeFilter ORDER BY time DESC LIMIT 300",
+          "titleColumn": "title",
+          "textColumn": "text",
+          "tagsColumn": "severity"
+        }
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 2,
+      "title": "Latest per-plugin readings · past minute",
+      "type": "table",
+      "datasource": {
+        "type": "influxdb",
+        "uid": "$datasource"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 24,
+        "h": 7
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "influxdb",
+            "uid": "$datasource"
+          },
+          "rawQuery": true,
+          "query": "SELECT LAST(\"tracked_ms_per_second\") AS \"Tracked ms/s\", LAST(\"calls_per_second\") AS \"Hook calls/s\", LAST(\"has_calls\") AS \"Calls supported\", LAST(\"has_exceptions\") AS \"Exceptions supported\", LAST(\"interval_valid\") AS \"Interval valid\" FROM \"plugin_runtime\" WHERE (\"server\" =~ /^${server:regex}$/) AND (\"plugin\" =~ /^${plugin:regex}$/ AND \"framework\" =~ /^${framework:regex}$/) AND time > now() - 1m AND time <= now() GROUP BY \"plugin\", \"framework\"",
+          "resultFormat": "table",
+          "alias": "$tag_plugin · $tag_framework"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "decimals": 2,
+          "noValue": "Unavailable",
+          "custom": {}
+        },
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm",
+        "footer": {
+          "show": false
+        }
+      },
+      "transformations": [
+        {
+          "id": "merge",
+          "options": {}
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Tracked elapsed time per plugin · ms / second",
+      "type": "timeseries",
+      "datasource": {
+        "type": "influxdb",
+        "uid": "$datasource"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 7,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "influxdb",
+            "uid": "$datasource"
+          },
+          "rawQuery": true,
+          "query": "SELECT MEAN(\"tracked_ms_per_second\") FROM \"plugin_runtime\" WHERE (\"server\" =~ /^${server:regex}$/) AND (\"plugin\" =~ /^${plugin:regex}$/ AND \"framework\" =~ /^${framework:regex}$/) AND $timeFilter GROUP BY time($__interval), \"plugin\", \"framework\" fill(null)",
+          "resultFormat": "time_series",
+          "alias": "$tag_plugin · $tag_framework"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "suffix:ms/s",
+          "decimals": 2,
+          "noValue": "Unavailable",
+          "custom": {
+            "spanNulls": false,
+            "lineWidth": 2
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "tooltip": {
+          "mode": "multi"
+        },
+        "legend": {
+          "showLegend": true,
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      },
+      "description": "Based on finite, reset-aware changes between native framework counters over the actual elapsed interval. Missing data and unsupported counters remain gaps. Carbon tracks hook dispatch; Oxide tracks framework-wrapped callbacks. This is elapsed time within that coverage, not total plugin CPU."
+    },
+    {
+      "id": 4,
+      "title": "Hook calls per second · Carbon only",
+      "type": "timeseries",
+      "datasource": {
+        "type": "influxdb",
+        "uid": "$datasource"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 7,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "influxdb",
+            "uid": "$datasource"
+          },
+          "rawQuery": true,
+          "query": "SELECT MEAN(\"calls_per_second\") FROM \"plugin_runtime\" WHERE (\"server\" =~ /^${server:regex}$/) AND (\"plugin\" =~ /^${plugin:regex}$/ AND \"framework\" =~ /^${framework:regex}$/) AND $timeFilter GROUP BY time($__interval), \"plugin\", \"framework\" fill(null)",
+          "resultFormat": "time_series",
+          "alias": "$tag_plugin · $tag_framework"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "cps",
+          "decimals": 2,
+          "noValue": "Unavailable",
+          "custom": {
+            "spanNulls": false,
+            "lineWidth": 2
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "tooltip": {
+          "mode": "multi"
+        },
+        "legend": {
+          "showLegend": true,
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      },
+      "description": "Based on finite, reset-aware changes between native framework counters over the actual elapsed interval. Missing data and unsupported counters remain gaps. Carbon tracks hook dispatch; Oxide tracks framework-wrapped callbacks. This is elapsed time within that coverage, not total plugin CPU."
+    },
+    {
+      "id": 5,
+      "title": "Hook exceptions per sample · Carbon only",
+      "type": "timeseries",
+      "datasource": {
+        "type": "influxdb",
+        "uid": "$datasource"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 15,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "influxdb",
+            "uid": "$datasource"
+          },
+          "rawQuery": true,
+          "query": "SELECT SUM(\"exceptions_delta\") FROM \"plugin_runtime\" WHERE (\"server\" =~ /^${server:regex}$/) AND (\"plugin\" =~ /^${plugin:regex}$/ AND \"framework\" =~ /^${framework:regex}$/) AND $timeFilter GROUP BY time($__interval), \"plugin\", \"framework\" fill(null)",
+          "resultFormat": "time_series",
+          "alias": "$tag_plugin · $tag_framework"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 2,
+          "noValue": "Unavailable",
+          "custom": {
+            "spanNulls": false,
+            "lineWidth": 2
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "tooltip": {
+          "mode": "multi"
+        },
+        "legend": {
+          "showLegend": true,
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      },
+      "description": "Based on finite, reset-aware changes between native framework counters over the actual elapsed interval. Missing data and unsupported counters remain gaps. Carbon tracks hook dispatch; Oxide tracks framework-wrapped callbacks. This is elapsed time within that coverage, not total plugin CPU."
+    },
+    {
+      "id": 6,
+      "title": "Framework hook lag spikes per sample · Carbon only",
+      "type": "timeseries",
+      "datasource": {
+        "type": "influxdb",
+        "uid": "$datasource"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 15,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "influxdb",
+            "uid": "$datasource"
+          },
+          "rawQuery": true,
+          "query": "SELECT SUM(\"lag_spikes_delta\") FROM \"plugin_runtime\" WHERE (\"server\" =~ /^${server:regex}$/) AND (\"plugin\" =~ /^${plugin:regex}$/ AND \"framework\" =~ /^${framework:regex}$/) AND $timeFilter GROUP BY time($__interval), \"plugin\", \"framework\" fill(null)",
+          "resultFormat": "time_series",
+          "alias": "$tag_plugin · $tag_framework"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 2,
+          "noValue": "Unavailable",
+          "custom": {
+            "spanNulls": false,
+            "lineWidth": 2
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "tooltip": {
+          "mode": "multi"
+        },
+        "legend": {
+          "showLegend": true,
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      },
+      "description": "Based on finite, reset-aware changes between native framework counters over the actual elapsed interval. Missing data and unsupported counters remain gaps. Carbon tracks hook dispatch; Oxide tracks framework-wrapped callbacks. This is elapsed time within that coverage, not total plugin CPU."
+    },
+    {
+      "id": 7,
+      "title": "Server events · select an annotation to inspect nearby spikes",
+      "type": "table",
+      "datasource": {
+        "type": "influxdb",
+        "uid": "$datasource"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 23,
+        "w": 24,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "influxdb",
+            "uid": "$datasource"
+          },
+          "rawQuery": true,
+          "query": "SELECT \"event\", \"plugin\", \"text\" FROM \"server_events\" WHERE (\"server\" =~ /^${server:regex}$/) AND $timeFilter ORDER BY time DESC LIMIT 300",
+          "resultFormat": "table",
+          "alias": "$tag_plugin · $tag_framework"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "decimals": 2,
+          "noValue": "Unavailable",
+          "custom": {}
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Time"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "dateTimeAsIso"
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm",
+        "footer": {
+          "show": false
+        }
+      },
+      "description": "UTC event timestamps, displayed in your dashboard timezone. Save callbacks mark initiation, not completion. Exception events mark detection during a sampling interval. Coincidence with a spike does not establish causation. At most the newest 300 events are listed (1,000 graph annotations)."
+    },
+    {
+      "id": 8,
+      "title": "Adapter polling elapsed time",
+      "type": "timeseries",
+      "datasource": {
+        "type": "influxdb",
+        "uid": "$datasource"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 31,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "influxdb",
+            "uid": "$datasource"
+          },
+          "rawQuery": true,
+          "query": "SELECT MEAN(\"poll_ms\") FROM \"adapter_health\" WHERE (\"server\" =~ /^${server:regex}$/) AND $timeFilter GROUP BY time($__interval) fill(null)",
+          "resultFormat": "time_series",
+          "alias": "$tag_plugin · $tag_framework"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms",
+          "decimals": 2,
+          "noValue": "Unavailable",
+          "custom": {
+            "spanNulls": false,
+            "lineWidth": 2
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "tooltip": {
+          "mode": "multi"
+        },
+        "legend": {
+          "showLegend": true,
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      },
+      "description": "Collector work and bounded transport health are measured separately; the collector is excluded from per-plugin rankings. Dropped points are cumulative for this adapter instance and reset on reload."
+    },
+    {
+      "id": 9,
+      "title": "Collector backlog / cumulative dropped points",
+      "type": "timeseries",
+      "datasource": {
+        "type": "influxdb",
+        "uid": "$datasource"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 31,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "influxdb",
+            "uid": "$datasource"
+          },
+          "rawQuery": true,
+          "query": "SELECT LAST(\"queued\") AS \"Queued\", LAST(\"dropped\") AS \"Dropped total\" FROM \"adapter_health\" WHERE (\"server\" =~ /^${server:regex}$/) AND $timeFilter GROUP BY time($__interval) fill(null)",
+          "resultFormat": "time_series",
+          "alias": "$tag_plugin · $tag_framework"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 2,
+          "noValue": "Unavailable",
+          "custom": {
+            "spanNulls": false,
+            "lineWidth": 2
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "tooltip": {
+          "mode": "multi"
+        },
+        "legend": {
+          "showLegend": true,
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      },
+      "description": "Collector work and bounded transport health are measured separately; the collector is excluded from per-plugin rankings. Dropped points are cumulative for this adapter instance and reset on reload."
+    },
+    {
+      "id": 10,
+      "type": "stat",
+      "title": "Last adapter sample",
+      "description": "Timestamp of the most recent adapter health sample. An old timestamp means this dashboard is not receiving current telemetry.",
+      "datasource": {
+        "type": "influxdb",
+        "uid": "$datasource"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 39,
+        "w": 8,
+        "h": 4
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "influxdb",
+            "uid": "$datasource"
+          },
+          "rawQuery": true,
+          "query": "SELECT \"queued\" FROM \"adapter_health\" WHERE (\"server\" =~ /^${server:regex}$/) AND time <= now() ORDER BY time DESC LIMIT 1",
+          "resultFormat": "table",
+          "alias": "$tag_plugin · $tag_framework"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "dateTimeFromNow",
+          "decimals": 0,
+          "noValue": "No data",
+          "mappings": [],
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "blue"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "values": false,
+          "calcs": ["lastNotNull"],
+          "fields": "/.*/"
+        },
+        "orientation": "auto",
+        "textMode": "value",
+        "colorMode": "none",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "wideLayout": true
+      },
+      "transformations": [
+        {
+          "id": "filterFieldsByName",
+          "options": {
+            "include": {
+              "names": ["Time"]
+            }
+          }
+        }
+      ]
+    }
+  ],
+  "links": [
+    {
+      "title": "Server overview",
+      "type": "link",
+      "url": "/d/rust-local-overview",
+      "includeVars": true,
+      "keepTime": true
+    },
+    {
+      "title": "Logs & exceptions",
+      "type": "link",
+      "url": "/d/rust-server-logs",
+      "includeVars": true,
+      "keepTime": true
+    }
+  ]
+}
