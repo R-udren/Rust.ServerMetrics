@@ -13,12 +13,14 @@ using Oxide.Core.Plugins;
 
 namespace Oxide.Plugins
 {
-    [Info("Server Metrics Adapter", "R-udren", "0.3.0")]
+    [Info("Server Metrics Adapter", "R-udren", "0.3.1")]
     [Description("Read-only framework counters and bounded local event telemetry; no Harmony patches")]
     public class ServerMetricsAdapter : RustPlugin
     {
         private Settings _settings;
         private bool _configurationValid;
+        private bool _waitingForConfiguration;
+        private string _setupMessage;
         private volatile bool _running;
         private readonly Dictionary<string, Sample> _samples = new();
         private readonly Dictionary<Type, CounterReader> _readers = new();
@@ -95,19 +97,48 @@ namespace Oxide.Plugins
         protected override void LoadConfig()
         {
             base.LoadConfig();
-            _settings = Config.ReadObject<Settings>();
-            Validate(_settings);
-            _configurationValid = true;
+            ReadConfiguration();
         }
 
-        public static void Validate(Settings settings)
+        private void ReadConfiguration()
+        {
+            _configurationValid = false;
+            string message;
+            try
+            {
+                if (!Config.Exists()) throw new FileNotFoundException("Metrics configuration is missing");
+                var settings = Config.ReadObject<Settings>();
+                Validate(settings, false);
+                _settings = settings;
+                _configurationValid = !string.IsNullOrWhiteSpace(settings.Password);
+                message = _configurationValid ? "" :
+                    "Setup required: set Password in ServerMetricsAdapter.json to your stack's INFLUXDB_WRITE_USER_PASSWORD. Save the file; collection starts automatically.";
+            }
+            catch (Exception error) when (error.GetType().Namespace == "Newtonsoft.Json" || error is ArgumentException ||
+                error is IOException || error is UnauthorizedAccessException)
+            {
+                message = "Invalid or unreadable ServerMetricsAdapter.json (" + error.GetType().Name +
+                    "). Correct the configuration; collection will start automatically. Existing settings have not been overwritten.";
+            }
+            if (message != _setupMessage && message.Length != 0) PrintWarning(message);
+            _setupMessage = message;
+        }
+
+        private void WaitForConfiguration()
+        {
+            if (!_waitingForConfiguration || _running) return;
+            ReadConfiguration();
+            if (_configurationValid) OnServerInitialized();
+        }
+
+        public static void Validate(Settings settings, bool requirePassword = true)
         {
             if (settings == null || !Uri.TryCreate(settings.Endpoint, UriKind.Absolute, out Uri endpoint) ||
                 endpoint.Scheme != "http" || !endpoint.IsLoopback || endpoint.UserInfo.Length != 0 ||
                 endpoint.AbsolutePath != "/" || endpoint.Query.Length != 0 || endpoint.Fragment.Length != 0)
                 throw new ArgumentException("Metrics Endpoint must be an HTTP loopback origin without credentials or a path");
             if (string.IsNullOrWhiteSpace(settings.Database) || string.IsNullOrWhiteSpace(settings.RetentionPolicy) ||
-                string.IsNullOrWhiteSpace(settings.Username) || string.IsNullOrWhiteSpace(settings.Password))
+                string.IsNullOrWhiteSpace(settings.Username) || (requirePassword && string.IsNullOrWhiteSpace(settings.Password)))
                 throw new ArgumentException("Metrics database, retention policy, username and password are required");
             if (string.IsNullOrWhiteSpace(settings.Server) || settings.Server.Length > 128 ||
                 settings.Server.Any(char.IsControl) || settings.Username.Contains(":"))
@@ -127,7 +158,15 @@ namespace Oxide.Plugins
 
         private void OnServerInitialized()
         {
-            if (_running || !_configurationValid) return;
+            if (_running) return;
+            if (!_configurationValid)
+            {
+                if (_waitingForConfiguration) return;
+                _waitingForConfiguration = true;
+                timer.Every(5, WaitForConfiguration);
+                return;
+            }
+            _waitingForConfiguration = false;
             Validate(_settings);
             _framework = typeof(Plugin).Assembly.GetName().Name == "Carbon.Common" ? "carbon" : "oxide";
             _headers = new Dictionary<string, string>
@@ -400,6 +439,7 @@ namespace Oxide.Plugins
 
         private void Unload()
         {
+            _waitingForConfiguration = false;
             _running = false;
             _nativeTimes.Clear();
             if (_logCallback != null)
@@ -426,6 +466,8 @@ namespace Oxide.Plugins
         private void Status(ConsoleSystem.Arg arg)
         {
             if (arg.Connection != null) return;
+            if (!_configurationValid)
+            { arg.ReplyWith("Metrics setup pending. " + _setupMessage); return; }
             arg.ReplyWith("framework=" + _framework + " running=" + _running + " plugins=" + _samples.Count +
                 " queued=" + _queue.Count + " in_flight=" + _inFlight + " uploaded_batches=" + _uploaded +
                 " dropped_points=" + _dropped + " upload_failures=" + _failures + " observer_errors=" + _observerErrors +
@@ -518,6 +560,8 @@ namespace Oxide.Plugins
         private void LogCapture(ConsoleSystem.Arg arg)
         {
             if (arg.Connection != null) return;
+            if (!_configurationValid)
+            { arg.ReplyWith("Complete metrics setup in ServerMetricsAdapter.json first."); return; }
             if (arg.Args == null || arg.Args.Length != 2 || arg.Args[0] != "all" ||
                 (arg.Args[1] != "on" && arg.Args[1] != "off"))
             { arg.ReplyWith("Usage: metricsadapter.logs all on|off"); return; }

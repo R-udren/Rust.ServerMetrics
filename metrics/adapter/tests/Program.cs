@@ -68,6 +68,44 @@ foreach (var endpoint in new[] { "https://127.0.0.1", "http://remote.example", "
     catch (ArgumentException) { Check(true, "Invalid endpoint rejected: " + endpoint.Split('@').Last()); }
 }
 
+var waitingAdapter = new ServerMetricsAdapter();
+waitingAdapter.Config.Value = new Settings();
+Invoke(waitingAdapter, "LoadConfig");
+Invoke(waitingAdapter, "OnServerInitialized");
+Check(!(bool)Field(waitingAdapter, "_running") && UnityEngine.Application.Listeners == 0 && InvokeProfiler.update.mode == 0,
+    "Fresh plugin waits for its password without collecting or changing native profiler settings");
+var invalidSettings = new Settings { Password = "test", Endpoint = "http://remote.example" };
+waitingAdapter.Config.Value = invalidSettings;
+Invoke(waitingAdapter, "WaitForConfiguration");
+var warningCount = waitingAdapter.Warnings.Count;
+Invoke(waitingAdapter, "WaitForConfiguration");
+Check(!(bool)Field(waitingAdapter, "_running") && waitingAdapter.Warnings.Count == warningCount &&
+    ReferenceEquals(waitingAdapter.Config.Value, invalidSettings),
+    "Invalid setup stays inactive, preserves configuration and reports each problem without repeated spam");
+waitingAdapter.Config.ReadFailure = new IOException("private-password-value");
+Invoke(waitingAdapter, "WaitForConfiguration");
+Check(!waitingAdapter.Warnings.Any(message => message.Contains("private-password-value")),
+    "Configuration read errors report setup state without echoing sensitive contents");
+waitingAdapter.Config.ReadFailure = null!;
+waitingAdapter.Config.Present = false;
+Invoke(waitingAdapter, "WaitForConfiguration");
+Check(!(bool)Field(waitingAdapter, "_running") && ReferenceEquals(waitingAdapter.Config.Value, invalidSettings),
+    "Missing setup file is not silently recreated or replaced");
+waitingAdapter.Config.Present = true;
+waitingAdapter.Config.Value = null!;
+Invoke(waitingAdapter, "WaitForConfiguration");
+Check(!(bool)Field(waitingAdapter, "_running"), "JSON null setup stays inactive");
+waitingAdapter.Config.Value = new Settings { Password = "test" };
+Invoke(waitingAdapter, "WaitForConfiguration");
+Invoke(waitingAdapter, "WaitForConfiguration");
+Invoke(waitingAdapter, "OnServerInitialized");
+Check((bool)Field(waitingAdapter, "_running") && UnityEngine.Application.Listeners == 1,
+    "Saving valid setup starts the collector exactly once without a plugin/server reload");
+Invoke(waitingAdapter, "Unload");
+Invoke(waitingAdapter, "WaitForConfiguration");
+Check(UnityEngine.Application.Listeners == 0 && !(bool)Field(waitingAdapter, "_running"),
+    "A late setup timer cannot restart an unloaded collector");
+
 var adapter = new ServerMetricsAdapter();
 adapter.Config.Value = new Settings { Password = "test", QueueLimit = 100 };
 Invoke(adapter, "LoadConfig");

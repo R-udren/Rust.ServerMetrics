@@ -38,16 +38,24 @@ namespace Oxide.Plugins
         public FakePlugins plugins = new();
         public FakeTimers timer = new();
         public FakeRequests webrequest = new();
+        public List<string> Warnings = [];
         protected virtual void LoadConfig() { }
         protected virtual void LoadDefaultConfig() { }
         public void Puts(string text) { }
-        public void PrintWarning(string text) { }
+        public void PrintWarning(string text) { Warnings.Add(text); }
         public void NextTick(Action callback) { callback(); }
     }
     public class FakeConfig
     {
         public object Value;
-        public T ReadObject<T>() { return (T)Value; }
+        public bool Present = true;
+        public Exception ReadFailure;
+        public bool Exists() { return Present; }
+        public T ReadObject<T>()
+        {
+            if (ReadFailure != null) throw ReadFailure;
+            return (T)Value;
+        }
         public void WriteObject<T>(T value, bool pretty) { Value = value; }
     }
     public class FakePlugins
